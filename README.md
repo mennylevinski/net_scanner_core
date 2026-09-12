@@ -32,7 +32,7 @@ Licensed under the [MIT License](LICENSE).
 - **HTTP Service Scan**, identifies web services running on discovered hosts
 - **Fast & Accurate**, combines ICMP, ARP, and socket checks and auto discovery
 - **Port Detection**, scans common service ports (FTP, SMB, SSH, RDP, and more)
-- **Basic Traffic Inspection** module, real-time monitoring of active TCP connections
+- **Basic Traffic Flow** module, real-time monitoring of active TCP connections
 - **Logging system**, exportable log file (TXT format) for more detailed output
 
 For a complete list of the common ports scanned by the tool, see [PORTS.md](PORTS.md)
