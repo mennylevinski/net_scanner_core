@@ -3,7 +3,13 @@ All notable changes to **Core Net Scanner** are documented in this file.
 
 ---
 
-## [1.9.0] – 2026-07-20 Latest
+## [1.9.1] – 2026-09-12 Latest
+### Fixed
+- Resolved local subnet detection issues
+
+---
+
+## [1.9.0] – 2026-07-20
 ### Fixed
 - Minor text corrections and console optimizations
 
