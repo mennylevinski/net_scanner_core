@@ -1,6 +1,6 @@
 <div align="center">
 
-# Core Net Scanner
+#  Net Scanner Core
 
 </div>
 
