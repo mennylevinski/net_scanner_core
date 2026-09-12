@@ -1,6 +1,6 @@
-# Common Ports Scanned by Core Net Scanner (v1.8.0)
+# Common Ports Scanned by Net Scanner Core (v1.8.0)
 
-This file lists the common ports that **Core Net Scanner** scans, along with their standard protocols and associated services.  
+This file lists the common ports that **Net Scanner Core** scans, along with their standard protocols and associated services.  
 
 > It can detect if these ports are open on your local IPv4 network.
 
