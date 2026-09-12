@@ -14,7 +14,9 @@ This file lists the common ports that **Core Net Scanner** scans, along with the
 | 67     | UDP       | DHCP Server                        |
 | 68     | UDP       | DHCP Client                        |
 | 69     | UDP       | TFTP                               |
+| 79     | TCP       | Finger                             |
 | 80     | TCP       | HTTP                               |
+| 111    | UDP       | RPCbind / Portmapper               |
 | 123    | UDP       | NTP                                |
 | 137    | UDP       | NetBIOS Name Service               |
 | 138    | UDP       | NetBIOS Datagram Service           |
@@ -28,6 +30,8 @@ This file lists the common ports that **Core Net Scanner** scans, along with the
 | 520    | UDP       | RIP (Routing Protocol)             |
 | 636    | TCP       | LDAPS                              |
 | 989    | TCP       | FTPS Data                          |
+| 990    | TCP       | FTPS Control                       |
+| 1080   | TCP       | SOCKS Proxy                        |
 | 1433   | TCP       | Microsoft SQL Server               |
 | 1434   | UDP       | Microsoft SQL Server Browser       |
 | 1521   | TCP       | Oracle Database                    |
@@ -55,6 +59,7 @@ This file lists the common ports that **Core Net Scanner** scans, along with the
 | 8080   | TCP       | HTTP Alternate / Proxy             |
 | 8443   | TCP       | HTTPS Alternate                    |
 | 9042   | TCP       | Cassandra / CQL                    |
+| 10000  | TCP       | Webmin                             |
 | 10443  | TCP       | HTTPS Alternate                    |
 | 11211  | UDP       | Memcached                          |
 | 30015  | TCP       | 1C:Enterprise / Custom App         |
