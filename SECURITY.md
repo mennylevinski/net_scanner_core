@@ -2,7 +2,7 @@
 
 ## 🔐 Supported Versions
 
-The following versions of **Core Net Scanner** are supported:
+The following versions of **Net Scanner Core** are supported:
 
 | Version        | Supported |
 | -------------- | --------- |
