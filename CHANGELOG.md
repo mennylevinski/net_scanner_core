@@ -1,5 +1,5 @@
 # Changelog
-All notable changes to **Core Net Scanner** are documented in this file.
+All notable changes to **Net Scanner Core** are documented in this file.
 
 ---
 
