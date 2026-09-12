@@ -32,7 +32,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from typing import List, Dict, Iterable, Optional
 
-version = "1.9.0"
+version = "1.9.1"
 
 try:
     from VersionChecker import fetch_latest_version
@@ -89,7 +89,7 @@ def setup_logger(level=logging.INFO, logfile: Optional[str] = None):
     logging.basicConfig(level=level, handlers=handlers)
 
 # ======= Console helper =======
-def ensure_console(title: str = "Core Net Scanner"):
+def ensure_console(title: str = "Net Scanner Core"):
     """Ensure a console is available on Windows with black background / white text."""
     if sys.platform.startswith("win"):
         try:
@@ -251,9 +251,9 @@ def http_probe(ip, timeout=2):
 
 # ======= LAN scanning configs =======
 # Default common ports to check quickly
-COMMON_PORTS_TCP = [20, 21, 22, 23, 80, 389, 443, 445, 636, 989, 1433, 1434, 1521, 2222, 2375, 2376, 2049, 5601, 3306, 3389, 5432, 5060, 5061, 5900, 5985, 5986, 6379, 8000, 8080, 8443, 9042, 10443, 30015, 27017]
+COMMON_PORTS_TCP = [20, 21, 22, 23, 79, 80, 389, 443, 445, 636, 989, 990, 1080, 1433, 1434, 1521, 2222, 2375, 2376, 2049, 5601, 3306, 3389, 5432, 5060, 5061, 5900, 5985, 5986, 6379, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9001, 9042, 10000, 10443, 27017, 30015]
 
-COMMON_PORTS_UDP = [53, 67, 68, 69, 123, 137, 138, 161, 162, 500, 514, 520, 1434, 1900, 3478, 4500, 5353, 5683, 11211, 27015]
+COMMON_PORTS_UDP = [53, 67, 68, 69, 111, 123, 137, 138, 161, 162, 500, 514, 520, 1900, 3478, 4500, 5353, 5683, 11211, 27015]
 
 # OS detection
 IS_WINDOWS = platform.system().lower().startswith("win")
@@ -776,13 +776,13 @@ def start_connection_inspector(
 
             # timeout
             if timeout > 0 and (now - start_time) >= timeout:
-                logging.info("Traffic inspection timeout reached.")
+                logging.info("Traffic flow timeout reached.")
                 stop_event.set()
                 break
 
             time.sleep(min(interval, 0.2))
 
-        logging.info("=== Traffic inspection stopped ===")
+        logging.info("=== Traffic flow stopped ===")
 
     thread = threading.Thread(target=_inspector, daemon=True)
     thread.start()
@@ -1040,7 +1040,7 @@ def is_private_ip(ip: str) -> bool:
 
 # ======= Main =======
 if __name__ == "__main__":
-    ensure_console(f"Core Net Scanner")
+    ensure_console(f"Net Scanner Core")
 
     log_level = logging.DEBUG if "--debug" in sys.argv else logging.INFO
     log_file = None
@@ -1058,22 +1058,42 @@ if __name__ == "__main__":
     print(f"MIT License – © 2025 Menahem Levinski\n")
     interface, local = _get_default_interface_and_ip()
     mac = _primary_mac()
-    logging.info(f"Core Net Scanner v{version}\n")
+    logging.info(f"Net Scanner Core v{version}\n")
     logging.info(f"Interface: {interface or 'N/A'}")
     logging.info(f"Local MAC: {mac or 'N/A'}")   
     logging.info(f"Local Adapter IP: {local or 'N/A'}")
 
-    # ---- ADD THIS LOGIC HERE ----
+    # ---- Detect local subnet ----
     if isinstance(local, str) and local.startswith("169.254."):
         logging.warning("APIPA detected (169.254.x.x). No DHCP lease — LAN scan disabled.")
         subnet = None
 
     elif isinstance(local, str) and "." in local:
-        subnet = guess_subnet(local, 24)
-        logging.info(f"Detected Subnet: {subnet}")
+        try:
+            addrs = psutil.net_if_addrs()
+            netmask = None
+
+            for addr in addrs.get(interface, []):
+                if addr.family == socket.AF_INET and addr.address == local:
+                    netmask = addr.netmask
+                    break
+
+            if netmask:
+                subnet = ipaddress.ip_network(
+                    f"{local}/{netmask}",
+                    strict=False
+                )
+                logging.info(f"Detected Subnet: {subnet}")
+            else:
+                logging.warning("Unable to determine network mask — LAN scan disabled.")
+                subnet = None
+
+        except Exception:
+            logging.warning("Unable to determine local subnet — LAN scan disabled.")
+            subnet = None
 
     else:
-        logging.warning("Subnet guessing skipped (IPv6 or no IP)")
+        logging.warning("Subnet detection skipped (IPv6 or no IP)")
         subnet = None
 
     # --- Initialize target_ips variable ---
@@ -1104,7 +1124,7 @@ def show_menu():
     print(f"{'scan -R':10} Custom IP range scan")
     print(f"{'scan -S':10} SMB / NetBIOS scan (LAN only)")
     print(f"{'scan -T':10} HTTP service scan (LAN only)")
-    print(f"{'scan -X':10} Device traffic inspection")
+    print(f"{'scan -X':10} Device traffic flow")
     print(f"{'help':10} Show menu")
     print(f"{'exit':10} Exit")
     
@@ -1379,7 +1399,7 @@ while True:
         stop_event, thread = start_connection_inspector(interval=2, ports=ports_to_monitor)
 
         try:
-            print("\nTraffic inspection running... Press ENTER to stop or Ctrl+C")
+            print("\nTraffic flow running... Press ENTER to stop or Ctrl+C")
             input()  # Wait for ENTER or Ctrl+C
         except KeyboardInterrupt:
             print("\nStopping due to keyboard interrupt...")
