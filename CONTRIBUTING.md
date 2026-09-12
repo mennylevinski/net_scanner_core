@@ -1,6 +1,6 @@
-# Contributing to Core Net Scanner
+# Contributing to Net Scanner Core
 
-Thank you for your interest in contributing to **Core Net Scanner**, Contributions of all kinds are welcome, code, documentation, testing, ideas, and feedback.
+Thank you for your interest in contributing to **Net Scanner Core**, Contributions of all kinds are welcome, code, documentation, testing, ideas, and feedback.
 
 This project is an **open-source, cross-platform Python tool** designed for ethical network diagnostics, security awareness, and administrative auditing.
 
