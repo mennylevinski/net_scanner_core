@@ -2,8 +2,11 @@
 All notable changes to **Net Scanner Core** are documented in this file.
 
 ---
+## [1.9.2] – 2026-10-16 Latest
+### Fixed
+- Minor updates and bug fixes 
 
-## [1.9.1] – 2026-09-12 Latest
+## [1.9.1] – 2026-09-12
 ### Fixed
 - Resolved local subnet detection issues
 
