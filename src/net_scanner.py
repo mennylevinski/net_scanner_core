@@ -32,7 +32,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from typing import List, Dict, Iterable, Optional
 
-version = "1.9.1"
+version = "1.9.2"
 
 try:
     from VersionChecker import fetch_latest_version
@@ -115,12 +115,6 @@ def ensure_console(title: str = "Net Scanner Core"):
                 pass
         except Exception:
             pass
-
-# --- String limitation ---
-def _limit_str(s: Optional[str], max_len: int = 23) -> Optional[str]:
-    if not s:
-        return s
-    return s if len(s) <= max_len else s[:max_len - 3] + "..."
 
 # --- Icon path ---
 def resource_path(relative_path):
@@ -606,30 +600,6 @@ def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, port
 def _highlight_risky_ports(ports: Iterable[int]) -> List[str]:
     mapping = {}
     return [f"{p}({mapping.get(p,'')})" if p in mapping else str(p) for p in ports]
-
-def _first_interface() -> Optional[str]:
-    """Return the first non-loopback interface name on Linux or Windows."""
-    system = platform.system().lower()
-    try:
-        if system == "linux":
-            out = subprocess.check_output(["ip", "link"], text=True)
-            m = re.findall(r"^\d+: (\S+):", out, re.MULTILINE)
-            for iface in m:
-                if iface != "lo":
-                    return _limit_str(iface)
-        elif system == "windows":
-            cmd = [
-                "powershell",
-                "-Command",
-                "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} "
-                "| Select-Object -First 1 -ExpandProperty Name"
-            ]
-            out = subprocess.check_output(cmd, text=True).strip()
-            if out:
-                return _limit_str(out)
-    except Exception:
-        return None
-    return None
 
 def _primary_mac() -> Optional[str]:
     """Return primary system MAC address (best-effort, cross-platform)."""
