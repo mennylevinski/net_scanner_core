@@ -32,7 +32,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from typing import List, Dict, Iterable, Optional
 
-version = "1.9.2"
+version = "1.9.3"
 
 try:
     from VersionChecker import fetch_latest_version
@@ -646,7 +646,7 @@ def _detect_direction(laddr_ip: str, raddr_ip: str, local_subnet: Optional[ipadd
 
     except ValueError:
         return "OUT"  # default fallback
-    
+
 def start_connection_inspector(
     interval: float = 1.0,
     ports: Optional[List[int]] = None,
@@ -715,7 +715,7 @@ def start_connection_inspector(
 
                     proc_name = _get_process_name(conn.pid)
 
-                    # FIX 5: CORRECT DIRECTION LOGIC
+                    # FIX 5: CORRECT DIRECTION AND PACKET ENDPOINTS
                     if conn.status == "LISTEN":
                         direction = "LISTEN"
                         src = f"{l_ip}:{l_port}"
@@ -723,8 +723,46 @@ def start_connection_inspector(
 
                     elif r_ip:
                         direction = _detect_direction(l_ip, r_ip, local_subnet)
-                        src = f"{l_ip}:{l_port}"
-                        dst = f"{r_ip}:{r_port}"
+
+                        if direction == "IN":
+                            src = f"{r_ip}:{r_port}"
+                            dst = f"{l_ip}:{l_port}"
+
+                        elif direction == "OUT":
+                            src = f"{l_ip}:{l_port}"
+                            dst = f"{r_ip}:{r_port}"
+
+                        else:
+                            # Private-to-private connection.
+                            # Correlate with a listening socket owned by the same PID
+                            # and using the same local endpoint.
+                            direction = "LAN"
+
+                            if conn.status == "ESTABLISHED" and conn.pid is not None:
+                                try:
+                                    is_server_side = any(
+                                        c.status == "LISTEN"
+                                        and c.pid == conn.pid
+                                        and c.laddr
+                                        and c.laddr.port == l_port
+                                        and c.laddr.ip in (l_ip, "0.0.0.0", "::")
+                                        for c in psutil.net_connections(kind="tcp")
+                                    )
+
+                                    if is_server_side:
+                                        direction = "IN"
+                                        src = f"{r_ip}:{r_port}"
+                                        dst = f"{l_ip}:{l_port}"
+                                    else:
+                                        src = f"{l_ip}:{l_port}"
+                                        dst = f"{r_ip}:{r_port}"
+
+                                except (psutil.Error, OSError):
+                                    src = f"{l_ip}:{l_port}"
+                                    dst = f"{r_ip}:{r_port}"
+                            else:
+                                src = f"{l_ip}:{l_port}"
+                                dst = f"{r_ip}:{r_port}"
 
                     else:
                         direction = "LOCAL"
