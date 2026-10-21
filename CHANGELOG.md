@@ -4,7 +4,8 @@ All notable changes to **Net Scanner Core** are documented in this file.
 ---
 
 ## [1.9.3] – 2026-10-21 Latest
-- Fixed incoming Traffic Flow direction detection
+### Fixed
+- Corrected incoming Traffic Flow direction detection.
 
 ---
 
