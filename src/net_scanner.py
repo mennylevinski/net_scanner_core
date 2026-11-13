@@ -16,6 +16,8 @@ import re
 import sys
 import time
 import uuid
+import shutil
+import struct
 import platform
 import socket
 import logging
@@ -356,54 +358,212 @@ def _parse_arp_table() -> Dict[str, str]:
         pass
     return ip_to_mac
 
-def _resolve_hostname(ip: str, timeout: float = 0.5) -> str:
-    # 1) Reverse DNS (cross-platform, safest)
+_HAS_NMBLOOKUP = bool(not IS_WINDOWS and shutil.which("nmblookup"))
+_HAS_AVAHI = bool(not IS_WINDOWS and shutil.which("avahi-resolve-address"))
+
+
+def _encode_dns_name(name: str) -> bytes:
+    """Encode a dotted hostname into DNS wire format."""
+    out = bytearray()
+    for part in name.split("."):
+        b = part.encode("ascii", errors="ignore")
+        out.append(len(b))
+        out.extend(b)
+    out.append(0)
+    return bytes(out)
+
+
+def _decode_dns_name(data: bytes, offset: int):
+    """Decode a DNS wire-format name (handling compression pointers)."""
+    labels = []
+    jumped = False
+    orig_offset = offset
+    seen = set()
+    while offset < len(data):
+        if offset in seen:
+            break
+        seen.add(offset)
+        length = data[offset]
+        if length == 0:
+            offset += 1
+            break
+        if (length & 0xC0) == 0xC0:
+            if offset + 1 >= len(data):
+                break
+            ptr = ((length & 0x3F) << 8) | data[offset + 1]
+            if not jumped:
+                orig_offset = offset + 2
+            offset = ptr
+            jumped = True
+        else:
+            offset += 1
+            labels.append(data[offset:offset + length].decode("utf-8", errors="replace"))
+            offset += length
+    return ".".join(labels), (orig_offset if jumped else offset)
+
+
+def _nbns_lookup(ip: str, timeout: float = 0.5) -> Optional[str]:
+    """Resolve hostname via NetBIOS Node Status Request (UDP 137)."""
+    packet = (
+        b"\x13\x37\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        b"\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00"
+        b"\x00\x21\x00\x01"
+    )
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(socket.gethostbyaddr, ip)
-            return fut.result(timeout=timeout)[0]
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.sendto(packet, (ip, 137))
+            data, _ = s.recvfrom(1024)
+            if len(data) < 12:
+                return None
+            qdcount, ancount = struct.unpack("!HH", data[4:8])
+            off = 12
+            for _ in range(qdcount):
+                _, off = _decode_dns_name(data, off)
+                off += 4
+            fallback = None
+            for _ in range(ancount):
+                if off >= len(data):
+                    break
+                _, off = _decode_dns_name(data, off)
+                if off + 10 > len(data):
+                    break
+                rtype, _, _, _ = struct.unpack("!HHIH", data[off:off + 10])
+                off += 10
+                if rtype == 0x0021 and off < len(data):
+                    num_names = data[off]
+                    pos = off + 1
+                    for _ in range(num_names):
+                        if pos + 18 > len(data):
+                            break
+                        raw_name = data[pos:pos + 15]
+                        suffix = data[pos + 15]
+                        flags = struct.unpack("!H", data[pos + 16:pos + 18])[0]
+                        is_group = bool(flags & 0x8000)
+                        if not is_group:
+                            name = raw_name.decode("ascii", errors="ignore").strip()
+                            if name and not name.startswith("*") and name != "__MSBROWSE__":
+                                if suffix == 0x00:
+                                    return name
+                                if suffix == 0x20 and fallback is None:
+                                    fallback = name
+                        pos += 18
+                    return fallback
     except Exception:
         pass
+    return None
 
-    # Linux-only methods here
-    if platform.system().lower() == "windows":
-        return "N/A"
 
-    # Helper: check if a command exists
-    def cmd_exists(cmd: str) -> bool:
-        return subprocess.call(
-            f"command -v {cmd} >/dev/null 2>&1", shell=True
-        ) == 0
+def _mdns_lookup(ip: str, timeout: float = 0.5) -> Optional[str]:
+    """Resolve hostname via direct unicast mDNS PTR query (UDP 5353)."""
+    try:
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return None
+        rev = ".".join(reversed(parts)) + ".in-addr.arpa"
+        qname = _encode_dns_name(rev)
+        pkt = b"\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00" + qname + b"\x00\x0c\x80\x01"
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.sendto(pkt, (ip, 5353))
+            data, addr = s.recvfrom(2048)
+            if addr[0] == ip and len(data) > 12:
+                qdcount, ancount = struct.unpack("!HH", data[4:8])
+                off = 12
+                for _ in range(qdcount):
+                    _, off = _decode_dns_name(data, off)
+                    off += 4
+                for _ in range(ancount):
+                    if off + 10 > len(data):
+                        break
+                    _, off = _decode_dns_name(data, off)
+                    if off + 10 > len(data):
+                        break
+                    rtype, _, _, rdlen = struct.unpack("!HHIH", data[off:off + 10])
+                    off += 10
+                    if rtype == 12:
+                        host, _ = _decode_dns_name(data, off)
+                        host = host.rstrip(".")
+                        if host and host != ip:
+                            return host
+                    off += rdlen
+    except Exception:
+        pass
+    return None
 
-    # 2) NetBIOS (nmblookup)
-    if cmd_exists("nmblookup"):
+
+def _resolve_hostname(ip: str, timeout: float = 0.8) -> str:
+    """Resolve IP to hostname using rDNS, mDNS, and NetBIOS within strict timeout."""
+    results = {}
+    lock = threading.Lock()
+    done = threading.Event()
+    remaining = [3]
+
+    def _finish(key: str, val: Optional[str]):
+        with lock:
+            if val and val != ip:
+                results[key] = val
+                done.set()
+            remaining[0] -= 1
+            if remaining[0] <= 0:
+                done.set()
+
+    def _run_rdns():
+        val = None
         try:
-            result = subprocess.check_output(
-                ["nmblookup", "-A", ip],
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                text=True
-            )
-            for line in result.splitlines():
-                if "<00>" in line and "GROUP" not in line:
-                    return line.split()[0]
+            val = socket.gethostbyaddr(ip)[0]
         except Exception:
             pass
+        _finish("rdns", val)
 
-    # 3) mDNS (avahi-resolve)
-    if cmd_exists("avahi-resolve-address"):
-        try:
-            result = subprocess.check_output(
-                ["avahi-resolve-address", ip],
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                text=True
-            ).strip()
+    def _run_nbns():
+        _finish("nbns", _nbns_lookup(ip, timeout=timeout))
 
-            if result and " " in result:
-                return result.split()[-1]
-        except Exception:
-            pass
+    def _run_mdns():
+        _finish("mdns", _mdns_lookup(ip, timeout=timeout))
+
+    for fn in (_run_rdns, _run_nbns, _run_mdns):
+        threading.Thread(target=fn, daemon=True).start()
+
+    done.wait(timeout=timeout)
+    with lock:
+        resolved = results.get("rdns") or results.get("mdns") or results.get("nbns")
+    if resolved:
+        return resolved
+
+    # Linux-only fallbacks (e.g., local Avahi daemon cache)
+    if not IS_WINDOWS:
+        if _HAS_AVAHI:
+            try:
+                result = subprocess.check_output(
+                    ["avahi-resolve-address", ip],
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout,
+                    text=True
+                ).strip()
+                parts = result.split()
+                if len(parts) >= 2:
+                    host = parts[-1].rstrip(".")
+                    if host and host != ip:
+                        return host
+            except Exception:
+                pass
+
+        if _HAS_NMBLOOKUP:
+            try:
+                result = subprocess.check_output(
+                    ["nmblookup", "-A", ip],
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout,
+                    text=True
+                )
+                for line in result.splitlines():
+                    if "<00>" in line and "GROUP" not in line:
+                        parts = line.split()
+                        if parts:
+                            return parts[0]
+            except Exception:
+                pass
 
     return "N/A"
 
@@ -582,15 +742,52 @@ def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, port
 
     devices = []
 
-    # ---- Step 4: Scan open ports (if enabled) and resolve hostnames ----
+    # Collect ARP-only hosts (TCP-blocked / firewalled) upfront so hostnames resolve in parallel
+    alive_set = set(alive_ips)
+    arp_only = []
+    for ip, mac in ip_mac.items():
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+
+            # Must be inside scanned subnet
+            if ip_obj not in subnet:
+                continue
+
+            # Skip broadcast address
+            if ip == str(subnet.broadcast_address):
+                continue
+
+            # Skip already-detected TCP hosts
+            if ip in alive_set:
+                continue
+
+            # Skip invalid MACs
+            if not mac or mac.lower().replace("-", ":").startswith("ff:ff"):
+                continue
+
+            arp_only.append((ip, mac))
+        except ValueError:
+            continue
+
+    # ---- Step 4: Scan open ports (if enabled) and resolve hostnames in parallel ----
+    all_target_ips = alive_ips + [ip for ip, _ in arp_only]
     with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ex:
         port_futures = {}
+        host_futures = {}
         for ip in alive_ips:
             if do_port_scan:
                 port_futures[ip] = ex.submit(_scan_ports, ip, ports, port_timeout, 200)
+        if not fast:
+            for ip in all_target_ips:
+                host_futures[ip] = ex.submit(_resolve_hostname, ip, 1.0)
 
         for ip in alive_ips:
-            hostname = _resolve_hostname(ip, timeout=1.0) if not fast else "N/A"
+            hostname = "N/A"
+            if not fast and ip in host_futures:
+                try:
+                    hostname = host_futures[ip].result(timeout=2.0)
+                except Exception:
+                    hostname = "N/A"
             mac = ip_mac.get(ip)
             open_ports = []
             if do_port_scan and ip in port_futures:
@@ -607,39 +804,22 @@ def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, port
                 "open_ports": open_ports
             })
 
-    # ---- Step 5: Include ARP-only hosts (TCP-blocked / firewalled) ----
-    existing_ips = {d["ip"] for d in devices}
-
-    for ip, mac in ip_mac.items():
-        try:
-            ip_obj = ipaddress.ip_address(ip)
-
-            # Must be inside scanned subnet
-            if ip_obj not in subnet:
-                continue
-
-            # Skip broadcast address
-            if ip == str(subnet.broadcast_address):
-                continue
-
-            # Skip already-detected TCP hosts
-            if ip in existing_ips:
-                continue
-
-            # Skip invalid MACs
-            if not mac or mac.lower().replace("-", ":").startswith("ff:ff"):
-                continue
+        # ---- Step 5: Include ARP-only hosts (TCP-blocked / firewalled) ----
+        for ip, mac in arp_only:
+            hostname = "N/A"
+            if not fast and ip in host_futures:
+                try:
+                    hostname = host_futures[ip].result(timeout=2.0)
+                except Exception:
+                    hostname = "N/A"
 
             devices.append({
                 "ip": ip,
-                "hostname": "N/A",
+                "hostname": hostname,
                 "mac": mac,
                 "alive": False,  # TCP didn’t respond
                 "open_ports": []
             })
-
-        except ValueError:
-            continue
 
     # ---- Step 6: Sort by IP ----
     return sorted(devices, key=lambda x: socket.inet_aton(x["ip"]))
@@ -1003,7 +1183,7 @@ def test_print(
     subnet: Optional[ipaddress.IPv4Network] = None,
     local_ip: Optional[str] = None,
     do_port_scan: bool = True,
-    fast: bool = True,
+    fast: bool = False,
     ports: Optional[Iterable[int]] = None,
     silent: bool = False,
 ) -> list:
@@ -1239,7 +1419,7 @@ while True:
                 subnet=subnet,
                 local_ip=local,
                 do_port_scan=True,
-                fast=True
+                fast=False
             )
             for d in results:
                 key = d.get("ip") or d.get("mac")
@@ -1311,7 +1491,7 @@ while True:
                     subnet=single_subnet,
                     local_ip=local,
                     do_port_scan=True,
-                    fast=True,
+                    fast=False,
                     silent=True
                 )
             except Exception as e:
