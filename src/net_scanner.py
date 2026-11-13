@@ -34,7 +34,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from typing import List, Dict, Iterable, Optional
 
-version = "1.9.4"
+version = "1.9.5"
 
 try:
     from VersionChecker import fetch_latest_version
@@ -667,21 +667,200 @@ def discover_hosts(subnet: ipaddress.IPv4Network, max_workers: int = 100, tcp_po
 
     return alive_ips
 
-def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, ports=None):
+def _scan_ips_incremental(
+    ips: List[str],
+    subnet: Optional[ipaddress.IPv4Network] = None,
+    local_ip: Optional[str] = None,
+    do_port_scan: bool = False,
+    fast: bool = False,
+    ports: Optional[Iterable[int]] = None,
+    on_device=None,
+    include_arp_only: bool = True,
+    check_arp_fallback: bool = False,
+    tcp_timeout: float = 0.3,
+    port_timeout: float = 0.6,
+) -> List[dict]:
     """
-    Discover hosts on a subnet. Works for Ethernet and Wi-Fi.
-    - Uses TCP ports + ICMP ping fallback.
-    - Pre-populates ARP table to detect devices that block ping/TCP.
+    Incrementally probe each IP in parallel and invoke `on_device(device)`
+    as soon as each host finishes discovery, port scanning, and hostname resolution.
+    Returns the full sorted list of discovered devices.
     """
+    if not ips:
+        return []
 
     if ports is None:
         ports = COMMON_PORTS_TCP + COMMON_PORTS_UDP
+    else:
+        ports = list(ports)
+
+    ip_mac = _parse_arp_table()
+    arp_lock = threading.Lock()
+    last_arp_refresh = [time.monotonic()]
+    ping_sem = threading.Semaphore(64)
+
+    emitted_ips = set()
+    emitted_lock = threading.Lock()
+    callback_lock = threading.Lock()
+    devices: List[dict] = []
+
+    def _emit(device: dict):
+        with emitted_lock:
+            if device["ip"] in emitted_ips:
+                return
+            emitted_ips.add(device["ip"])
+            devices.append(device)
+        if on_device:
+            with callback_lock:
+                on_device(device)
+
+    def _get_mac(ip: str) -> Optional[str]:
+        with arp_lock:
+            mac = ip_mac.get(ip)
+            if mac:
+                return mac
+            now_mono = time.monotonic()
+            if now_mono - last_arp_refresh[0] >= 0.25:
+                ip_mac.update(_parse_arp_table())
+                last_arp_refresh[0] = now_mono
+                return ip_mac.get(ip)
+        return None
+
+    def _probe_host(ip: str):
+        if local_ip and ip == local_ip:
+            return
+
+        tcp_alive = False
+        for port in (22, 53, 80, 139, 443, 445):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(tcp_timeout)
+                    if s.connect_ex((ip, port)) == 0:
+                        tcp_alive = True
+                        break
+            except Exception:
+                pass
+
+        ping_alive = False
+        if not tcp_alive:
+            with ping_sem:
+                ping_alive = _ping(ip, timeout_ms=300)
+
+        in_arp = False
+        if not tcp_alive and not ping_alive and check_arp_fallback:
+            with arp_lock:
+                in_arp = ip in ip_mac
+
+        if not tcp_alive and not ping_alive and not in_arp:
+            return
+
+        alive = tcp_alive or ping_alive
+
+        # Resolve hostname in parallel with port scan for this host
+        hostname_box = ["N/A"]
+        host_thread = None
+        if not fast:
+            def _do_host():
+                hostname_box[0] = _resolve_hostname(ip, timeout=0.9)
+            host_thread = threading.Thread(target=_do_host, daemon=True)
+            host_thread.start()
+
+        open_ports = _scan_ports(ip, ports, port_timeout, 64) if do_port_scan else []
+
+        if host_thread is not None:
+            host_thread.join(timeout=1.5)
+
+        mac = _get_mac(ip)
+
+        _emit({
+            "ip": ip,
+            "hostname": hostname_box[0],
+            "mac": mac,
+            "alive": alive,
+            "open_ports": open_ports,
+        })
+
+    interrupted = False
+    worker_count = min(100, len(ips))
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+    futures = [ex.submit(_probe_host, ip) for ip in ips]
+    try:
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                fut.result()
+            except Exception:
+                pass
+    except KeyboardInterrupt:
+        interrupted = True
+        for fut in futures:
+            fut.cancel()
+        raise
+    finally:
+        ex.shutdown(wait=not interrupted)
+
+    # ---- Include ARP-only hosts (TCP/ICMP-blocked / firewalled) ----
+    if include_arp_only and subnet is not None:
+        fresh_arp = _parse_arp_table()
+        with emitted_lock:
+            already = set(emitted_ips)
+        arp_only = []
+        for ip, mac in fresh_arp.items():
+            try:
+                ip_obj = ipaddress.ip_address(ip)
+                if ip_obj not in subnet:
+                    continue
+                if ip == str(subnet.broadcast_address):
+                    continue
+                if local_ip and ip == local_ip:
+                    continue
+                if ip in already:
+                    continue
+                if not mac or mac.lower().replace("-", ":").startswith("ff:ff"):
+                    continue
+                arp_only.append((ip, mac))
+            except ValueError:
+                continue
+
+        if arp_only:
+            def _finish_arp_only(ip_mac_pair):
+                ip, mac = ip_mac_pair
+                hostname = _resolve_hostname(ip, timeout=0.9) if not fast else "N/A"
+                _emit({
+                    "ip": ip,
+                    "hostname": hostname,
+                    "mac": mac,
+                    "alive": False,
+                    "open_ports": [],
+                })
+
+            arp_ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(50, len(arp_only)))
+            arp_futures = [arp_ex.submit(_finish_arp_only, item) for item in arp_only]
+            arp_interrupted = False
+            try:
+                for fut in concurrent.futures.as_completed(arp_futures):
+                    try:
+                        fut.result()
+                    except Exception:
+                        pass
+            except KeyboardInterrupt:
+                arp_interrupted = True
+                for fut in arp_futures:
+                    fut.cancel()
+                raise
+            finally:
+                arp_ex.shutdown(wait=not arp_interrupted)
+
+    return sorted(devices, key=lambda x: socket.inet_aton(x["ip"]))
+
+
+def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, ports=None, on_device=None):
+    """
+    Discover hosts on a subnet incrementally. Works for Ethernet and Wi-Fi.
+    - Uses TCP ports + ICMP ping + ARP table to detect hosts.
+    - Emits each discovered host immediately via `on_device(device)` if provided.
+    """
 
     if subnet is None and local_ip:
         subnet = guess_subnet(local_ip, 24)
-
-    port_timeout = 0.6
-    tcp_timeout = 0.3
 
     if not subnet:
         logging.warning("No subnet provided, skipping scan.")
@@ -701,128 +880,17 @@ def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, port
             )
             return []
 
-    # ---- Step 0: Pre-populate ARP cache ----
     ips = [str(ip) for ip in subnet.hosts()]
-    logging.info("")
-    logging.info(f"Pre-pinging {len(ips)} IPs to populate ARP cache")
-    ping_workers = min(len(ips), 64)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=ping_workers) as ex:
-        list(ex.map(lambda ip: _ping(ip, timeout_ms=300), ips))
-
-    # ---- Step 1: Parallel ping + TCP sweep ----
-    def _fast_alive(ip):
-        tcp_hits = 0
-        tcp_ports = [22, 53, 139, 161, 443, 445]
-
-        for port in tcp_ports:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(tcp_timeout)
-                    if s.connect_ex((ip, port)) == 0:
-                        tcp_hits += 1
-            except Exception:
-                pass
-
-        if tcp_hits >= 1:
-            return ip
-
-    alive_ips = []
-    max_threads = min(128, len(ips))  # 128 is aggressive but safe
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as ex:
-        for result in ex.map(_fast_alive, ips):
-            if result:
-                alive_ips.append(result)
-
-    # ---- Step 2: Skip local IP ----
-    if local_ip and local_ip in alive_ips:
-        alive_ips.remove(local_ip)
-
-    # ---- Step 3: Parse ARP table for MACs ----
-    ip_mac = _parse_arp_table()
-
-    devices = []
-
-    # Collect ARP-only hosts (TCP-blocked / firewalled) upfront so hostnames resolve in parallel
-    alive_set = set(alive_ips)
-    arp_only = []
-    for ip, mac in ip_mac.items():
-        try:
-            ip_obj = ipaddress.ip_address(ip)
-
-            # Must be inside scanned subnet
-            if ip_obj not in subnet:
-                continue
-
-            # Skip broadcast address
-            if ip == str(subnet.broadcast_address):
-                continue
-
-            # Skip already-detected TCP hosts
-            if ip in alive_set:
-                continue
-
-            # Skip invalid MACs
-            if not mac or mac.lower().replace("-", ":").startswith("ff:ff"):
-                continue
-
-            arp_only.append((ip, mac))
-        except ValueError:
-            continue
-
-    # ---- Step 4: Scan open ports (if enabled) and resolve hostnames in parallel ----
-    all_target_ips = alive_ips + [ip for ip, _ in arp_only]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ex:
-        port_futures = {}
-        host_futures = {}
-        for ip in alive_ips:
-            if do_port_scan:
-                port_futures[ip] = ex.submit(_scan_ports, ip, ports, port_timeout, 200)
-        if not fast:
-            for ip in all_target_ips:
-                host_futures[ip] = ex.submit(_resolve_hostname, ip, 1.0)
-
-        for ip in alive_ips:
-            hostname = "N/A"
-            if not fast and ip in host_futures:
-                try:
-                    hostname = host_futures[ip].result(timeout=2.0)
-                except Exception:
-                    hostname = "N/A"
-            mac = ip_mac.get(ip)
-            open_ports = []
-            if do_port_scan and ip in port_futures:
-                try:
-                    open_ports = port_futures[ip].result(timeout=10)
-                except Exception:
-                    open_ports = []
-
-            devices.append({
-                "ip": ip,
-                "hostname": hostname,
-                "mac": mac,
-                "alive": True,
-                "open_ports": open_ports
-            })
-
-        # ---- Step 5: Include ARP-only hosts (TCP-blocked / firewalled) ----
-        for ip, mac in arp_only:
-            hostname = "N/A"
-            if not fast and ip in host_futures:
-                try:
-                    hostname = host_futures[ip].result(timeout=2.0)
-                except Exception:
-                    hostname = "N/A"
-
-            devices.append({
-                "ip": ip,
-                "hostname": hostname,
-                "mac": mac,
-                "alive": False,  # TCP didn’t respond
-                "open_ports": []
-            })
-
-    # ---- Step 6: Sort by IP ----
-    return sorted(devices, key=lambda x: socket.inet_aton(x["ip"]))
+    return _scan_ips_incremental(
+        ips=ips,
+        subnet=subnet,
+        local_ip=local_ip,
+        do_port_scan=do_port_scan,
+        fast=fast,
+        ports=ports,
+        on_device=on_device,
+        include_arp_only=True,
+    )
 
 def _highlight_risky_ports(ports: Iterable[int]) -> List[str]:
     mapping = {}
@@ -1179,6 +1247,41 @@ def smb_scan(subnet, local_ip=None, timeout: float = 0.3):
     return results
 
 # ======= Print Setup =======
+_TABLE_HEADERS = ["IP Address", "Hostname", "MAC", "Alive", "Open Ports"]
+_TABLE_COL_WIDTHS = [15, 20, 20, 10, 45]
+
+
+def _trim_col(s: str, w: int) -> str:
+    return (s[: w - 3] + "...") if len(s) > w else s
+
+
+def _print_table_header() -> str:
+    header_line = "  ".join(h.center(w) for h, w in zip(_TABLE_HEADERS, _TABLE_COL_WIDTHS))
+    sep_line = "–" * len(header_line)
+    logging.info(sep_line)
+    logging.info(header_line)
+    logging.info(sep_line)
+    return sep_line
+
+
+def _format_device_row(d: dict) -> str:
+    ip = d["ip"]
+    host = _trim_col(d.get("hostname") or "N/A", _TABLE_COL_WIDTHS[1])
+    mac = _trim_col(d.get("mac") or "N/A", _TABLE_COL_WIDTHS[2])
+    alive = str(d["alive"])
+    ports_str = (
+        ", ".join(_highlight_risky_ports(d["open_ports"]))
+        if d.get("open_ports")
+        else "N/A"
+    )
+    ports_str = _trim_col(ports_str, _TABLE_COL_WIDTHS[4])
+    return (
+        f"{ip.ljust(_TABLE_COL_WIDTHS[0])}  {host.center(_TABLE_COL_WIDTHS[1])}  "
+        f"{mac.center(_TABLE_COL_WIDTHS[2])}  {alive.center(_TABLE_COL_WIDTHS[3])}  "
+        f"{ports_str.center(_TABLE_COL_WIDTHS[4])}"
+    )
+
+
 def test_print(
     subnet: Optional[ipaddress.IPv4Network] = None,
     local_ip: Optional[str] = None,
@@ -1186,96 +1289,65 @@ def test_print(
     fast: bool = False,
     ports: Optional[Iterable[int]] = None,
     silent: bool = False,
+    on_device=None,
 ) -> list:
 
     if subnet is None and local_ip:
         subnet = guess_subnet(local_ip, 24)
 
-    devices = discover_network(
-        subnet=subnet,
-        local_ip=local_ip,
-        do_port_scan=do_port_scan,
-        fast=fast,
-        ports=ports
-    )
-
     if silent:
-        return devices
-
-    # --- Print table ---
-    headers = ["IP Address", "Hostname", "MAC", "Alive", "Open Ports"]
-    col_widths = [15, 20, 20, 10, 45]
-
-    def _trim(s: str, w: int) -> str:
-        return (s[: w - 3] + "...") if len(s) > w else s
-
-    header_line = "  ".join(h.center(w) for h, w in zip(headers, col_widths))
-    sep_line = "–" * len(header_line)
-    logging.info("")
-    logging.info(f"Scanned subnet: {subnet} — found {len(devices)} devices")
-    logging.info(sep_line)
-    logging.info(header_line)
-    logging.info(sep_line)
-
-    seen_ips = set()
-    for d in devices:
-        ip = d["ip"]
-        if ip in seen_ips:
-            continue
-        seen_ips.add(ip)
-
-        host = _trim(d.get("hostname") or "N/A", col_widths[1])
-        mac = _trim(d.get("mac") or "N/A", col_widths[2])
-        alive = str(d["alive"])
-        if d.get("open_ports"):
-            ports_str = ", ".join(_highlight_risky_ports(d["open_ports"]))
-        else:
-            ports_str = "N/A"
-        ports_str = _trim(ports_str, col_widths[4])
-
-        logging.info(
-            f"{ip.ljust(col_widths[0])}  {host.center(col_widths[1])}  "
-            f"{mac.center(col_widths[2])}  {alive.center(col_widths[3])}  {ports_str.center(col_widths[4])}"
+        return discover_network(
+            subnet=subnet,
+            local_ip=local_ip,
+            do_port_scan=do_port_scan,
+            fast=fast,
+            ports=ports,
+            on_device=on_device,
         )
 
-    logging.info(sep_line)
+    logging.info("")
+    logging.info(f"Scanning subnet: {subnet}...")
+    sep_line = _print_table_header()
+
+    seen_ips = set()
+    print_lock = threading.Lock()
+
+    def _stream_device(d: dict):
+        ip = d["ip"]
+        with print_lock:
+            if ip in seen_ips:
+                return
+            seen_ips.add(ip)
+            logging.info(_format_device_row(d))
+        if on_device:
+            on_device(d)
+
+    devices = []
+    try:
+        devices = discover_network(
+            subnet=subnet,
+            local_ip=local_ip,
+            do_port_scan=do_port_scan,
+            fast=fast,
+            ports=ports,
+            on_device=_stream_device,
+        )
+    finally:
+        logging.info(sep_line)
+        logging.info(f"Found {len(seen_ips)} devices")
+
     return devices
 
+
 def print_devices(devices: list):
-    # Same logic as test_print, just the printing part
-    headers = ["IP Address", "Hostname", "MAC", "Alive", "Open Ports"]
-    col_widths = [15, 20, 20, 10, 45]
-
-    def _trim(s: str, w: int) -> str:
-        return (s[: w - 3] + "...") if len(s) > w else s
-
-    header_line = "  ".join(h.center(w) for h, w in zip(headers, col_widths))
-    sep_line = "–" * len(header_line)
-
-    logging.info(sep_line)
-    logging.info(header_line)
-    logging.info(sep_line)
-
+    sep_line = _print_table_header()
     seen_ips = set()
     for d in devices:
         ip = d["ip"]
         if ip in seen_ips:
             continue
         seen_ips.add(ip)
-
-        host = _trim(d.get("hostname") or "N/A", col_widths[1])
-        mac = _trim(d.get("mac") or "N/A", col_widths[2])
-        alive = str(d["alive"])
-        ports_str = _trim(
-            ", ".join(_highlight_risky_ports(d.get("open_ports", []))) if d.get("open_ports") else "N/A",
-            col_widths[4]
-        )
-
-        logging.info(
-            f"{ip.ljust(col_widths[0])}  {host.center(col_widths[1])}  "
-            f"{mac.center(col_widths[2])}  {alive.center(col_widths[3])}  {ports_str.center(col_widths[4])}"
-        )
-
+        logging.info(_format_device_row(d))
     logging.info(sep_line)
 
 # --- Define private IP check ---
@@ -1411,22 +1483,26 @@ while True:
             continue
 
         scan_results.clear()
-        spinner = Spinner("Running LAN scan")
-        spinner.start()
         start = time.time()
+
+        def _record_device(d):
+            key = d.get("ip") or d.get("mac")
+            if key:
+                with scan_lock:
+                    if key not in scan_results:
+                        scan_results[key] = d
+
         try:
-            results = test_print(
+            test_print(
                 subnet=subnet,
                 local_ip=local,
                 do_port_scan=True,
-                fast=False
+                fast=False,
+                on_device=_record_device,
             )
-            for d in results:
-                key = d.get("ip") or d.get("mac")
-                if key and key not in scan_results:
-                    scan_results[key] = d
+        except KeyboardInterrupt:
+            print("\nLAN scan interrupted — partial results preserved.")
         finally:
-            spinner.stop()
             elapsed = time.time() - start
             logging.info(f"LAN scan finished in {elapsed:.1f}s")
 
@@ -1454,75 +1530,55 @@ while True:
 
         print(f"\nTarget IPs: {len(target_ips)}")
         print(", ".join(target_ips[:10]) + (" ..." if len(target_ips) > 10 else ""))
-        
+
         logging.info("")
         logging.info(f"Starting custom scan for {len(target_ips)} targets...")
 
         scan_results.clear()
-        ip_mac = _parse_arp_table()
-
-        spinner = Spinner("Running custom scan")
-        spinner.start()
-        start = time.time()
-
-        # ONLY CHANGE: parallel loop
-        def process_ip(ip):
-
-            # 0 Skip local IP
+        valid_ips = []
+        for ip in target_ips:
             if local and ip == local:
-                logging.info(f"\n[SKIP] {ip} is local — skipping.")
-                return
-
-            # 1 Only scan private IPs
+                logging.info(f"[SKIP] {ip} is local — skipping.")
+                continue
             if not is_private_ip(ip):
-                logging.info(f"\n[SKIP] {ip} is not private — skipping.")
-                return
+                logging.info(f"[SKIP] {ip} is not private — skipping.")
+                continue
+            valid_ips.append(ip)
 
-            # 2 ICMP + ARP filter (UNCHANGED LOGIC)
-            if ip not in ip_mac and not _ping(ip, timeout_ms=400):
-                return
+        start = time.time()
+        if valid_ips:
+            sep_line = _print_table_header()
 
-            # 3 Convert to /32 subnet for test_print
-            single_subnet = ipaddress.ip_network(f"{ip}/32")
+            def _stream_custom(d):
+                key = d.get("ip") or d.get("mac")
+                with scan_lock:
+                    if key and key not in scan_results:
+                        scan_results[key] = d
+                    logging.info(_format_device_row(d))
 
-            # 4 Run silent scan (UNCHANGED)
             try:
-                results = test_print(
-                    subnet=single_subnet,
+                _scan_ips_incremental(
+                    ips=valid_ips,
+                    subnet=None,
                     local_ip=local,
                     do_port_scan=True,
                     fast=False,
-                    silent=True
+                    on_device=_stream_custom,
+                    include_arp_only=False,
+                    check_arp_fallback=True,
                 )
-            except Exception as e:
-                logging.error(f"[ERROR] Scan failed for {ip}: {e}")
-                return
+            except KeyboardInterrupt:
+                print("\nCustom scan interrupted — partial results preserved.")
+            finally:
+                logging.info(sep_line)
 
-            # 5 Collect results (UNCHANGED)
-            if results:
-                for d in results:
-                    key = d.get("ip") or d.get("mac")
-                    if key:
-                        with scan_lock:
-                            if key not in scan_results:
-                                scan_results[key] = d
-
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
-                list(ex.map(process_ip, target_ips))
-
-        finally:
-            spinner.stop()
-            elapsed = time.time() - start
-
-            if scan_results:
-                logging.info(
-                    f"Custom scan finished in {elapsed:.1f}s — found {len(scan_results)} devices."
-                )
-                devices_snapshot = list(scan_results.values())
-                print_devices(devices_snapshot)
-            else:
-                print(f"Custom scan finished in {elapsed:.1f}s - No devices found.")
+        elapsed = time.time() - start
+        if scan_results:
+            logging.info(
+                f"Custom scan finished in {elapsed:.1f}s — found {len(scan_results)} devices."
+            )
+        else:
+            print(f"Custom scan finished in {elapsed:.1f}s - No devices found.")
 
     elif scan_mode == "scan -s":
 

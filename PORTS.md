@@ -1,4 +1,4 @@
-# Common Ports Scanned by Net Scanner Core (v1.9.4)
+# Common Ports Scanned by Net Scanner Core (v1.9.5)
 
 This file lists the common ports that **Net Scanner Core** scans, along with their standard protocols and associated services.  
 

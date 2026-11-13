@@ -3,7 +3,14 @@ All notable changes to **Net Scanner Core** are documented in this file.
 
 ---
 
-## [1.9.4] – 2026-11-13 Latest
+## [1.9.5] – 2026-11-13 Latest
+- Incremental streaming execution for LAN scanning and custom IP range scanning.
+- Fixed hostname resolution (`_resolve_hostname`), preventing blocking OS reverse-DNS timeouts.
+- Eliminated redundant `/32` subnet scans in `scan -R` and preserved partial scan results.
+
+---
+
+## [1.9.4] – 2026-11-13
 - Fixed user-selected timeout being discarded and sleep interval in Traffic Flow (`scan -x`).
 - Added UDP datagram probing to eliminate false negatives when scanning UDP ports from PORTS.md.
 - Optimized connection direction lookup in Connection Inspector from O(N²) to O(N).
