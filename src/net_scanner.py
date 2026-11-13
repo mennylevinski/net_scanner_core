@@ -32,7 +32,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from typing import List, Dict, Iterable, Optional
 
-version = "1.9.3"
+version = "1.9.4"
 
 try:
     from VersionChecker import fetch_latest_version
@@ -249,6 +249,8 @@ COMMON_PORTS_TCP = [20, 21, 22, 23, 79, 80, 389, 443, 445, 636, 989, 990, 1080, 
 
 COMMON_PORTS_UDP = [53, 67, 68, 69, 111, 123, 137, 138, 161, 162, 500, 514, 520, 1900, 3478, 4500, 5353, 5683, 11211, 27015]
 
+MAX_SUBNET_HOSTS = 512
+
 # OS detection
 IS_WINDOWS = platform.system().lower().startswith("win")
 
@@ -342,7 +344,7 @@ def _parse_arp_table() -> Dict[str, str]:
             for line in out.splitlines():
                 m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{14,17})", line)
                 if m:
-                    ip, mac = m.group(1), m.group(2).replace("–", ":").lower()
+                    ip, mac = m.group(1), m.group(2).replace("-", ":").lower()
                     ip_to_mac[ip] = mac
         else:
             for line in out.splitlines():
@@ -405,6 +407,22 @@ def _resolve_hostname(ip: str, timeout: float = 0.5) -> str:
 
     return "N/A"
 
+UDP_PROBES: Dict[int, bytes] = {
+    53: b"\xaa\xaa\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07version\x04bind\x00\x00\x10\x00\x03",
+    69: b"\x00\x01test\x00octet\x00",
+    123: b"\x1b" + 47 * b"\0",
+    137: b"\x80\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00\x00!\x00\x01",
+    161: b"\x30\x26\x02\x01\x01\x04\x06public\xa0\x19\x02\x04\x00\x00\x00\x00\x02\x01\x00\x02\x01\x00\x30\x0b\x30\x09\x06\x05\x2b\x06\x01\x02\x01\x05\x00",
+    162: b"\x30\x26\x02\x01\x01\x04\x06public\xa0\x19\x02\x04\x00\x00\x00\x00\x02\x01\x00\x02\x01\x00\x30\x0b\x30\x09\x06\x05\x2b\x06\x01\x02\x01\x05\x00",
+    520: b"\x01\x01\x00\x00" + 20 * b"\x00",
+    1434: b"\x02",
+    1900: b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n',
+    5353: b"\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01",
+    5683: b"\x40\x01\x12\x34",
+    11211: b"\x00\x00\x00\x00\x00\x01\x00\x00stats\r\n",
+    27015: b"\xff\xff\xff\xffTSource Engine Query\x00",
+}
+
 def _scan_ports(ip: str, ports: Iterable[int], timeout: float = 0.5, max_workers: int = 100) -> List[int]:
     open_ports = []
     ports_list = list(ports)
@@ -412,13 +430,27 @@ def _scan_ports(ip: str, ports: Iterable[int], timeout: float = 0.5, max_workers
         return []
 
     def _try_port(port: int) -> Optional[int]:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(timeout)
-                if s.connect_ex((ip, port)) == 0:
-                    return port
-        except Exception:
-            pass
+        if port in COMMON_PORTS_UDP or port in UDP_PROBES:
+            try:
+                probe = UDP_PROBES.get(port, b"\x00")
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.settimeout(timeout)
+                    s.sendto(probe, (ip, port))
+                    data, _ = s.recvfrom(1024)
+                    if data:
+                        return port
+            except Exception:
+                pass
+
+        if port not in COMMON_PORTS_UDP or port in COMMON_PORTS_TCP:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(timeout)
+                    if s.connect_ex((ip, port)) == 0:
+                        return port
+            except Exception:
+                pass
+
         return None
 
     worker_count = min(max_workers, len(ports_list))
@@ -495,11 +527,26 @@ def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, port
         logging.warning("No subnet provided, skipping scan.")
         return []
 
+    if subnet.num_addresses > MAX_SUBNET_HOSTS:
+        if local_ip:
+            logging.warning(
+                f"Subnet {subnet} is too large ({subnet.num_addresses} addresses). "
+                f"Restricting LAN scan to /24 around {local_ip} to prevent system freeze."
+            )
+            subnet = guess_subnet(local_ip, 24)
+        else:
+            logging.error(
+                f"Subnet {subnet} is too large ({subnet.num_addresses} addresses; max is {MAX_SUBNET_HOSTS}). "
+                "Aborting scan to prevent system freeze."
+            )
+            return []
+
     # ---- Step 0: Pre-populate ARP cache ----
     ips = [str(ip) for ip in subnet.hosts()]
     logging.info("")
     logging.info(f"Pre-pinging {len(ips)} IPs to populate ARP cache")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=200) as ex:
+    ping_workers = min(len(ips), 64)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=ping_workers) as ex:
         list(ex.map(lambda ip: _ping(ip, timeout_ms=300), ips))
 
     # ---- Step 1: Parallel ping + TCP sweep ----
@@ -580,7 +627,7 @@ def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, port
                 continue
 
             # Skip invalid MACs
-            if not mac or mac.lower().startswith("ff-ff"):
+            if not mac or mac.lower().replace("-", ":").startswith("ff:ff"):
                 continue
 
             devices.append({
@@ -674,7 +721,14 @@ def start_connection_inspector(
             now = time.time()
 
             try:
-                for conn in psutil.net_connections(kind="inet"):
+                conns = psutil.net_connections(kind="inet")
+                listen_set = {
+                    (c.pid, c.laddr.port, c.laddr.ip)
+                    for c in conns
+                    if c.status == "LISTEN" and c.laddr and c.pid is not None
+                }
+
+                for conn in conns:
 
                     # must have local address
                     if not conn.laddr:
@@ -740,13 +794,10 @@ def start_connection_inspector(
 
                             if conn.status == "ESTABLISHED" and conn.pid is not None:
                                 try:
-                                    is_server_side = any(
-                                        c.status == "LISTEN"
-                                        and c.pid == conn.pid
-                                        and c.laddr
-                                        and c.laddr.port == l_port
-                                        and c.laddr.ip in (l_ip, "0.0.0.0", "::")
-                                        for c in psutil.net_connections(kind="tcp")
+                                    is_server_side = (
+                                        (conn.pid, l_port, l_ip) in listen_set
+                                        or (conn.pid, l_port, "0.0.0.0") in listen_set
+                                        or (conn.pid, l_port, "::") in listen_set
                                     )
 
                                     if is_server_side:
@@ -788,7 +839,7 @@ def start_connection_inspector(
                 stop_event.set()
                 break
 
-            time.sleep(min(interval, 0.2))
+            time.sleep(interval)
 
         logging.info("=== Traffic flow stopped ===")
 
@@ -898,6 +949,14 @@ def smb_scan(subnet, local_ip=None, timeout: float = 0.3):
     if not subnet:
         print("No subnet provided.")
         return []
+
+    if subnet.num_addresses > MAX_SUBNET_HOSTS:
+        if local_ip:
+            logging.warning(f"Subnet {subnet} is too large. Restricting to /24 around {local_ip}.")
+            subnet = guess_subnet(local_ip, 24)
+        else:
+            logging.error(f"Subnet {subnet} is too large ({subnet.num_addresses} addresses). Aborting scan.")
+            return []
 
     ips = [str(ip) for ip in subnet.hosts()]
     results = []
@@ -1091,6 +1150,12 @@ if __name__ == "__main__":
                     f"{local}/{netmask}",
                     strict=False
                 )
+                if subnet.num_addresses > MAX_SUBNET_HOSTS:
+                    logging.warning(
+                        f"Detected large subnet: {subnet} ({subnet.num_addresses} addresses). "
+                        f"Defaulting LAN scan scope to /24 around {local} to prevent system freeze."
+                    )
+                    subnet = guess_subnet(local, 24)
                 logging.info(f"Detected Subnet: {subnet}")
             else:
                 logging.warning("Unable to determine network mask — LAN scan disabled.")
@@ -1333,6 +1398,14 @@ while True:
             logging.info("No subnet detected.")
             continue
 
+        if subnet.num_addresses > MAX_SUBNET_HOSTS:
+            if local:
+                logging.warning(f"Subnet {subnet} is too large. Restricting to /24 around {local}.")
+                subnet = guess_subnet(local, 24)
+            else:
+                logging.error(f"Subnet {subnet} is too large ({subnet.num_addresses} addresses). Aborting HTTP scan.")
+                continue
+
         ips = [str(ip) for ip in subnet.hosts()]
 
         logging.info("")
@@ -1342,7 +1415,8 @@ while True:
         ip_mac = _parse_arp_table()
 
         # STEP 1A: ICMP check
-        with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ex:
+        ping_workers = min(len(ips), 64)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=ping_workers) as ex:
             for ip, ok in zip(ips, ex.map(_ping, ips)):
                 if ok:
                     alive_ips.add(ip)
@@ -1404,7 +1478,7 @@ while True:
         else:
             ports_to_monitor = None
 
-        stop_event, thread = start_connection_inspector(interval=2, ports=ports_to_monitor)
+        stop_event, thread = start_connection_inspector(interval=2, ports=ports_to_monitor, timeout=timeout)
 
         try:
             print("\nTraffic flow running... Press ENTER to stop or Ctrl+C")

@@ -3,7 +3,16 @@ All notable changes to **Net Scanner Core** are documented in this file.
 
 ---
 
-## [1.9.3] – 2026-10-21 Latest
+## [1.9.4] – 2026-11-13 Latest
+- Fixed user-selected timeout being discarded and sleep interval in Traffic Flow (`scan -x`).
+- Added UDP datagram probing to eliminate false negatives when scanning UDP ports from PORTS.md.
+- Optimized connection direction lookup in Connection Inspector from O(N²) to O(N).
+- Corrected ARP parsing on Windows and normalized broadcast MAC address filtering on Linux.
+- Added subnet size guardrails and bounded concurrent ping workers to (/16, /8) networks.
+
+---
+
+## [1.9.3] – 2026-10-21
 ### Fixed
 - Corrected incoming Traffic Flow direction detection.
 
