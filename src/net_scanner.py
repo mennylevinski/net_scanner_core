@@ -1122,7 +1122,7 @@ if __name__ == "__main__":
     scan_lock = threading.Lock()
 
     # --- Detect local IP and subnet ---
-    print(f"MIT License – © 2025 Menahem Levinski\n")
+    print(f"MIT License – © 2026 Menahem Levinski\n")
     interface, local = _get_default_interface_and_ip()
     mac = _primary_mac()
     logging.info(f"Net Scanner Core v{version}\n")
