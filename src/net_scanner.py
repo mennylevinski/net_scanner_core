@@ -50,25 +50,6 @@ except Exception as e:
 log_buffer = io.StringIO()
 now = datetime.datetime.now().replace(microsecond=0)
 
-# ====== Icon Setup =======
-ICO_ICON = "net_scanner_icon.ico"
-PNG_ICON = "net_scanner_icon.png"
-
-def resource_path(relative_path):
-    if hasattr(sys, "_MEIPASS"):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
-
-def set_window_icon(window):
-    try:
-        window.iconbitmap(resource_path(ICO_ICON))
-    except Exception:
-        try:
-            from tkinter import PhotoImage
-            window.iconphoto(False, PhotoImage(file=resource_path(PNG_ICON)))
-        except Exception:
-            pass
-
 # ====== Logger Setup =======
 def setup_logger(level=logging.INFO, logfile: Optional[str] = None):
     """Configure root logger. Call once at program start."""
@@ -118,13 +99,6 @@ def ensure_console(title: str = "Net Scanner Core"):
         except Exception:
             pass
 
-# --- Icon path ---
-def resource_path(relative_path):
-    """ Get absolute path to resource (works in .py and in PyInstaller EXE) """
-    if hasattr(sys, '_MEIPASS'):  # PyInstaller sets this attr
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
-
 # ======= Noise filter helper =======
 NOISE_PORTS = {
     5353,   # mDNS
@@ -138,13 +112,12 @@ NOISE_IP_PREFIXES = (
     "127.",      # loopback
     "169.254.",  # APIPA
     "fe80:",     # IPv6 link-local
-    "::1",
-    "::",
 )
 
 def _is_noise_traffic(conn) -> bool:
     try:
-        if conn.status not in ("ESTABLISHED", "CLOSE_WAIT", "SYN_SENT", "LISTEN"):
+        is_udp = conn.type == socket.SOCK_DGRAM
+        if not is_udp and conn.status not in ("ESTABLISHED", "CLOSE_WAIT", "SYN_SENT", "LISTEN"):
             return True
 
         l_ip = conn.laddr.ip if conn.laddr else ""
@@ -152,26 +125,20 @@ def _is_noise_traffic(conn) -> bool:
 
         l_port = conn.laddr.port if conn.laddr else 0
 
-        # DROP IPv6 LINK-LOCAL NOISE
-        if isinstance(l_ip, str) and l_ip.startswith("fe80:"):
+        # Loopback, unspecified, APIPA, and IPv6 link-local noise
+        if l_ip in ("::", "::1") or r_ip in ("::", "::1"):
             return True
-        if isinstance(r_ip, str) and r_ip.startswith("fe80:"):
+        if isinstance(l_ip, str) and l_ip.startswith(NOISE_IP_PREFIXES):
             return True
-
-        # IPv6 multicast / local service noise
-        if l_ip in ("::", "::1"):
-            return True
-
-        # IPv4 noise ranges
-        if l_ip.startswith(("127.", "169.254.")):
+        if isinstance(r_ip, str) and r_ip.startswith(NOISE_IP_PREFIXES):
             return True
 
         # Service discovery ports
         if l_port in NOISE_PORTS:
             return True
 
-        # UDP broadcast noise
-        if conn.type == socket.SOCK_DGRAM and not conn.raddr:
+        # UDP broadcast / unbound socket noise
+        if is_udp and not conn.raddr:
             return True
 
         return False
@@ -207,11 +174,9 @@ class Spinner:
 def http_probe(ip, timeout=2):
     urls = [
         f"http://{ip}",
-        f"http://{ip}:80",
         f"http://{ip}:8080",
         f"http://{ip}:8000",
         f"https://{ip}",
-        f"https://{ip}:443",
         f"https://{ip}:8443",
         f"https://{ip}:10443",
     ]
@@ -282,12 +247,6 @@ def _run_check_output(cmd, shell=False, **kwargs) -> str:
     base_kwargs.update(_subproc_kwargs_hide_window())
     base_kwargs.update(kwargs)
     return subprocess.check_output(cmd, **base_kwargs)
-
-def _run_subprocess_run(cmd, shell=False, **kwargs) -> subprocess.CompletedProcess:
-    base_kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "shell": shell}
-    base_kwargs.update(_subproc_kwargs_hide_window())
-    base_kwargs.update(kwargs)
-    return subprocess.run(cmd, **base_kwargs)
 
 def _get_default_interface_and_ip() -> (Optional[str], Optional[str]):
     """
@@ -404,11 +363,7 @@ def _decode_dns_name(data: bytes, offset: int):
 
 def _nbns_lookup(ip: str, timeout: float = 0.5) -> Optional[str]:
     """Resolve hostname via NetBIOS Node Status Request (UDP 137)."""
-    packet = (
-        b"\x13\x37\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
-        b"\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00"
-        b"\x00\x21\x00\x01"
-    )
+    packet = UDP_PROBES[137]
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(timeout)
@@ -624,49 +579,6 @@ def _scan_ports(ip: str, ports: Iterable[int], timeout: float = 0.5, max_workers
 
     return sorted(open_ports)
 
-def discover_hosts(subnet: ipaddress.IPv4Network, max_workers: int = 100, tcp_ports=None, timeout: float = 0.1) -> List[str]:
-    """
-    Detect alive hosts in the subnet using TCP ports first, then optional ping fallback.
-    Returns list of IPs that respond and (on Windows) have a MAC in ARP table.
-    """
-    if tcp_ports is None:
-        tcp_ports = [22, 53, 80, 139, 443, 445, 3389]
-
-    ips = [str(ip) for ip in subnet.hosts()]
-    if not ips:
-        return []
-
-    ip_mac = _parse_arp_table()  # prefetch ARP once
-
-    def _check_ip(ip):
-        # 1️⃣ TCP check
-        for port in tcp_ports:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(timeout)
-                    if s.connect_ex((ip, port)) == 0:
-                        return ip
-            except Exception:
-                continue
-
-        # 2️⃣ Ping fallback only for small subnets (<50 hosts)
-        if len(ips) <= 50 and _ping(ip, timeout_ms=300):
-            return ip
-
-        return None
-
-    alive_ips = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(ips))) as ex:
-        for ip in ex.map(_check_ip, ips):
-            if ip:
-                alive_ips.append(ip)
-
-    # ---- Windows-only: filter out IPs without a MAC in ARP table ----
-    if IS_WINDOWS:
-        alive_ips = [ip for ip in alive_ips if ip_mac.get(ip)]
-
-    return alive_ips
-
 def _scan_ips_incremental(
     ips: List[str],
     subnet: Optional[ipaddress.IPv4Network] = None,
@@ -852,6 +764,26 @@ def _scan_ips_incremental(
     return sorted(devices, key=lambda x: socket.inet_aton(x["ip"]))
 
 
+def _clamp_subnet(
+    subnet: Optional[ipaddress.IPv4Network],
+    local_ip: Optional[str] = None,
+    action: str = "scan",
+) -> Optional[ipaddress.IPv4Network]:
+    """Clamp oversized subnets to /24 around local_ip, or return None if unbounded."""
+    if subnet is None or subnet.num_addresses <= MAX_SUBNET_HOSTS:
+        return subnet
+    if local_ip:
+        logging.warning(
+            f"Subnet {subnet} is too large ({subnet.num_addresses} addresses). "
+            f"Restricting {action} to /24 around {local_ip} to prevent system freeze."
+        )
+        return guess_subnet(local_ip, 24)
+    logging.error(
+        f"Subnet {subnet} is too large ({subnet.num_addresses} addresses; max is {MAX_SUBNET_HOSTS}). "
+        f"Aborting {action} to prevent system freeze."
+    )
+    return None
+
 def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, ports=None, on_device=None):
     """
     Discover hosts on a subnet incrementally. Works for Ethernet and Wi-Fi.
@@ -866,19 +798,9 @@ def discover_network(subnet, local_ip=None, do_port_scan=False, fast=False, port
         logging.warning("No subnet provided, skipping scan.")
         return []
 
-    if subnet.num_addresses > MAX_SUBNET_HOSTS:
-        if local_ip:
-            logging.warning(
-                f"Subnet {subnet} is too large ({subnet.num_addresses} addresses). "
-                f"Restricting LAN scan to /24 around {local_ip} to prevent system freeze."
-            )
-            subnet = guess_subnet(local_ip, 24)
-        else:
-            logging.error(
-                f"Subnet {subnet} is too large ({subnet.num_addresses} addresses; max is {MAX_SUBNET_HOSTS}). "
-                "Aborting scan to prevent system freeze."
-            )
-            return []
+    subnet = _clamp_subnet(subnet, local_ip=local_ip, action="LAN scan")
+    if not subnet:
+        return []
 
     ips = [str(ip) for ip in subnet.hosts()]
     return _scan_ips_incremental(
@@ -906,38 +828,41 @@ def _primary_mac() -> Optional[str]:
 
 # ======= Connection Inspector (Controlled) =======
 def _get_process_name(pid):
+    if pid is None:
+        return "N/A"
     try:
         return psutil.Process(pid).name()
     except Exception:
         return "N/A"
 
-def _detect_direction(laddr_ip: str, raddr_ip: str, local_subnet: Optional[ipaddress.IPv4Network] = None) -> str:
+def _detect_direction(
+    laddr_ip: str,
+    raddr_ip: str,
+    local_subnet: Optional[ipaddress.IPv4Network] = None,
+    is_server_side: bool = False,
+) -> str:
     """
-    Detects if connection is IN (incoming) or OUT (outgoing)
+    Detects if connection is IN (incoming), OUT (outgoing), or LAN.
     - laddr_ip = local IP
     - raddr_ip = remote IP
     - local_subnet = optional, for strict LAN check
+    - is_server_side = True when local endpoint matches an active listening socket
     Returns: 'IN', 'OUT', or 'LAN'
     """
+    if is_server_side:
+        return "IN"
+
     try:
-        l_ip = ipaddress.ip_address(laddr_ip)
         r_ip = ipaddress.ip_address(raddr_ip)
 
         if local_subnet:
             if r_ip in local_subnet:
                 return "LAN"
-            elif l_ip in local_subnet:
-                return "OUT"
-            else:
-                return "IN"
+            return "OUT"
 
-        # Fallback using is_private
         if r_ip.is_private:
             return "LAN"
-        elif l_ip.is_private:
-            return "OUT"
-        else:
-            return "IN"
+        return "OUT"
 
     except ValueError:
         return "OUT"  # default fallback
@@ -1003,12 +928,9 @@ def start_connection_inspector(
                     if _is_noise_traffic(conn):
                         continue
 
-                    # FIX 4: LISTEN CLEANUP (only TCP logic)
-                    if conn.status == "LISTEN":
-                        if l_ip in ("127.0.0.1", "::1", "0.0.0.0", "::"):
-                            continue
-                        if l_port in NOISE_PORTS:
-                            continue
+                    # FIX 4: LISTEN CLEANUP (skip wildcard-bound listeners)
+                    if conn.status == "LISTEN" and l_ip == "0.0.0.0":
+                        continue
 
                     key = (conn.pid, l_ip, l_port, r_ip, r_port, conn.status)
                     if key in seen:
@@ -1024,44 +946,28 @@ def start_connection_inspector(
                         dst = "*:*"
 
                     elif r_ip:
-                        direction = _detect_direction(l_ip, r_ip, local_subnet)
+                        is_server_side = (
+                            conn.pid is not None
+                            and conn.status in ("ESTABLISHED", "CLOSE_WAIT")
+                            and (
+                                (conn.pid, l_port, l_ip) in listen_set
+                                or (conn.pid, l_port, "0.0.0.0") in listen_set
+                                or (conn.pid, l_port, "::") in listen_set
+                            )
+                        )
+                        direction = _detect_direction(
+                            l_ip,
+                            r_ip,
+                            local_subnet,
+                            is_server_side=is_server_side,
+                        )
 
                         if direction == "IN":
                             src = f"{r_ip}:{r_port}"
                             dst = f"{l_ip}:{l_port}"
-
-                        elif direction == "OUT":
+                        else:
                             src = f"{l_ip}:{l_port}"
                             dst = f"{r_ip}:{r_port}"
-
-                        else:
-                            # Private-to-private connection.
-                            # Correlate with a listening socket owned by the same PID
-                            # and using the same local endpoint.
-                            direction = "LAN"
-
-                            if conn.status == "ESTABLISHED" and conn.pid is not None:
-                                try:
-                                    is_server_side = (
-                                        (conn.pid, l_port, l_ip) in listen_set
-                                        or (conn.pid, l_port, "0.0.0.0") in listen_set
-                                        or (conn.pid, l_port, "::") in listen_set
-                                    )
-
-                                    if is_server_side:
-                                        direction = "IN"
-                                        src = f"{r_ip}:{r_port}"
-                                        dst = f"{l_ip}:{l_port}"
-                                    else:
-                                        src = f"{l_ip}:{l_port}"
-                                        dst = f"{r_ip}:{r_port}"
-
-                                except (psutil.Error, OSError):
-                                    src = f"{l_ip}:{l_port}"
-                                    dst = f"{r_ip}:{r_port}"
-                            else:
-                                src = f"{l_ip}:{l_port}"
-                                dst = f"{r_ip}:{r_port}"
 
                     else:
                         direction = "LOCAL"
@@ -1096,25 +1002,6 @@ def start_connection_inspector(
     return stop_event, thread
 
 # ======= SMB Scanner =======
-def smb_detect(ip: str, timeout: float = 0.5) -> bool:
-    """
-    Quick SMB availability check (no auth, no exploitation).
-    """
-    ports = [445, 139]
-
-    for port in ports:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(timeout)
-
-                if s.connect_ex((ip, port)) == 0:
-                    return True
-
-        except Exception:
-            pass
-
-    return False
-
 def smb_probe_shares(ip: str):
     """
     Safe SMB share enumeration using Windows 'net view'.
@@ -1198,13 +1085,9 @@ def smb_scan(subnet, local_ip=None, timeout: float = 0.3):
         print("No subnet provided.")
         return []
 
-    if subnet.num_addresses > MAX_SUBNET_HOSTS:
-        if local_ip:
-            logging.warning(f"Subnet {subnet} is too large. Restricting to /24 around {local_ip}.")
-            subnet = guess_subnet(local_ip, 24)
-        else:
-            logging.error(f"Subnet {subnet} is too large ({subnet.num_addresses} addresses). Aborting scan.")
-            return []
+    subnet = _clamp_subnet(subnet, local_ip=local_ip, action="SMB scan")
+    if not subnet:
+        return []
 
     ips = [str(ip) for ip in subnet.hosts()]
     results = []
@@ -1357,9 +1240,33 @@ def is_private_ip(ip: str) -> bool:
     except ValueError:
         return False
 
+# --- Helper functions ---
+def _ip_range_from_full_ips(start_ip: str, end_ip: str) -> List[str]:
+    a = ipaddress.IPv4Address(start_ip)
+    b = ipaddress.IPv4Address(end_ip)
+    if int(b) < int(a):
+        raise ValueError("End IP is smaller than start IP")
+    size = int(b) - int(a) + 1
+    if size > MAX_SUBNET_HOSTS:
+        raise ValueError(f"Range too large ({size} IPs); max is {MAX_SUBNET_HOSTS}")
+    return [str(ipaddress.IPv4Address(int(a) + i)) for i in range(size)]
+
+def show_menu():
+    title = "Commands (case-insensitive):"
+    print("\n" + title)
+    print("–" * len(title))
+
+    print(f"{'scan -L':10} LAN scan (devices and ports)")
+    print(f"{'scan -R':10} Custom IP range scan")
+    print(f"{'scan -S':10} SMB / NetBIOS scan (LAN only)")
+    print(f"{'scan -T':10} HTTP service scan (LAN only)")
+    print(f"{'scan -X':10} Device traffic flow")
+    print(f"{'help':10} Show menu")
+    print(f"{'exit':10} Exit")
+
 # ======= Main =======
-if __name__ == "__main__":
-    ensure_console(f"Net Scanner Core")
+def main():
+    ensure_console("Net Scanner Core")
 
     log_level = logging.DEBUG if "--debug" in sys.argv else logging.INFO
     log_file = None
@@ -1372,14 +1279,15 @@ if __name__ == "__main__":
 
     setup_logger(level=log_level, logfile=log_file)
     scan_lock = threading.Lock()
+    scan_results = {}
 
     # --- Detect local IP and subnet ---
-    print(f"MIT License – © 2026 Menahem Levinski\n")
+    print("MIT License – © 2026 Menahem Levinski\n")
     interface, local = _get_default_interface_and_ip()
     mac = _primary_mac()
     logging.info(f"Net Scanner Core v{version}\n")
     logging.info(f"Interface: {interface or 'N/A'}")
-    logging.info(f"Local MAC: {mac or 'N/A'}")   
+    logging.info(f"Local MAC: {mac or 'N/A'}")
     logging.info(f"Local Adapter IP: {local or 'N/A'}")
 
     # ---- Detect local subnet ----
@@ -1402,13 +1310,9 @@ if __name__ == "__main__":
                     f"{local}/{netmask}",
                     strict=False
                 )
-                if subnet.num_addresses > MAX_SUBNET_HOSTS:
-                    logging.warning(
-                        f"Detected large subnet: {subnet} ({subnet.num_addresses} addresses). "
-                        f"Defaulting LAN scan scope to /24 around {local} to prevent system freeze."
-                    )
-                    subnet = guess_subnet(local, 24)
-                logging.info(f"Detected Subnet: {subnet}")
+                subnet = _clamp_subnet(subnet, local_ip=local, action="LAN scan")
+                if subnet:
+                    logging.info(f"Detected Subnet: {subnet}")
             else:
                 logging.warning("Unable to determine network mask — LAN scan disabled.")
                 subnet = None
@@ -1421,319 +1325,275 @@ if __name__ == "__main__":
         logging.warning("Subnet detection skipped (IPv6 or no IP)")
         subnet = None
 
-    # --- Initialize target_ips variable ---
-    target_ips = None
+    show_menu()
 
-# --- Ask user which scan to perform (LAN or custom) ---
-MAX_RANGE_SIZE = 512
-scan_results = {}
+    while True:
+        scan_mode = input("\n> ").strip().lower()
 
-# --- Helper functions ---
-def _ip_range_from_full_ips(start_ip: str, end_ip: str) -> List[str]:
-    a = ipaddress.IPv4Address(start_ip)
-    b = ipaddress.IPv4Address(end_ip)
-    if int(b) < int(a):
-        raise ValueError("End IP is smaller than start IP")
-    size = int(b) - int(a) + 1
-    if size > MAX_RANGE_SIZE:
-        raise ValueError(f"Range too large ({size} IPs); max is {MAX_RANGE_SIZE}")
-    return [str(ipaddress.IPv4Address(int(a) + i)) for i in range(size)]
-
-# ---- Main scan loop ----
-def show_menu():
-    title = "Commands (case-insensitive):"
-    print("\n" + title)
-    print("–" * len(title))
-
-    print(f"{'scan -L':10} LAN scan (devices and ports)")
-    print(f"{'scan -R':10} Custom IP range scan")
-    print(f"{'scan -S':10} SMB / NetBIOS scan (LAN only)")
-    print(f"{'scan -T':10} HTTP service scan (LAN only)")
-    print(f"{'scan -X':10} Device traffic flow")
-    print(f"{'help':10} Show menu")
-    print(f"{'exit':10} Exit")
-    
-show_menu()
-
-while True:
-    scan_mode = input("\n> ").strip().lower()
-
-    if scan_mode not in {"scan -l", "scan -r", "scan -s", "scan -t", "scan -x", "help", "exit", ""}:
-        print("Invalid command!")
-        continue
-
-    elif scan_mode == "":
-        continue
-
-    elif scan_mode == "help":
-        show_menu()
-        continue
-
-    elif scan_mode == "exit":
-        input("\nGoodbye! Press Enter to exit...")
-        sys.exit(0)
-            
-    if scan_mode == "scan -l":
-        choice = input("\nStart full LAN scan? (Y/N): ").strip().upper()
-        if choice not in ("Y", "N"):
-            print("Invalid choice!")
-            continue
-        if choice != "Y":
-            print("LAN scan cancelled.")
+        if scan_mode not in {"scan -l", "scan -r", "scan -s", "scan -t", "scan -x", "help", "exit", ""}:
+            print("Invalid command!")
             continue
 
-        scan_results.clear()
-        start = time.time()
-
-        def _record_device(d):
-            key = d.get("ip") or d.get("mac")
-            if key:
-                with scan_lock:
-                    if key not in scan_results:
-                        scan_results[key] = d
-
-        try:
-            test_print(
-                subnet=subnet,
-                local_ip=local,
-                do_port_scan=True,
-                fast=False,
-                on_device=_record_device,
-            )
-        except KeyboardInterrupt:
-            print("\nLAN scan interrupted — partial results preserved.")
-        finally:
-            elapsed = time.time() - start
-            logging.info(f"LAN scan finished in {elapsed:.1f}s")
-
-    elif scan_mode == "scan -r":
-        print("\nCustom scan options:")
-        print("Format options:")
-        print(" - Single IP (example: 1.1.1.1)")
-        print(" - IP Range  (example: 1.1.1.1-1.1.1.50)\n")
-
-        raw = input("Enter target (single IP or range): ").strip()
-        target_ips = []
-
-        try:
-            if "-" in raw:
-                start_ip, end_ip = map(str.strip, raw.split("-", 1))
-                ipaddress.ip_address(start_ip)
-                ipaddress.ip_address(end_ip)
-                target_ips = _ip_range_from_full_ips(start_ip, end_ip)
-            else:
-                ipaddress.ip_address(raw)
-                target_ips = [raw]
-        except Exception as e:
-            print(f"Invalid input: {e}")
+        elif scan_mode == "":
             continue
 
-        print(f"\nTarget IPs: {len(target_ips)}")
-        print(", ".join(target_ips[:10]) + (" ..." if len(target_ips) > 10 else ""))
+        elif scan_mode == "help":
+            show_menu()
+            continue
 
-        logging.info("")
-        logging.info(f"Starting custom scan for {len(target_ips)} targets...")
+        elif scan_mode == "exit":
+            input("\nGoodbye! Press Enter to exit...")
+            sys.exit(0)
 
-        scan_results.clear()
-        valid_ips = []
-        for ip in target_ips:
-            if local and ip == local:
-                logging.info(f"[SKIP] {ip} is local — skipping.")
+        if scan_mode == "scan -l":
+            choice = input("\nStart full LAN scan? (Y/N): ").strip().upper()
+            if choice not in ("Y", "N"):
+                print("Invalid choice!")
                 continue
-            if not is_private_ip(ip):
-                logging.info(f"[SKIP] {ip} is not private — skipping.")
+            if choice != "Y":
+                print("LAN scan cancelled.")
                 continue
-            valid_ips.append(ip)
 
-        start = time.time()
-        if valid_ips:
-            sep_line = _print_table_header()
+            scan_results.clear()
+            start = time.time()
 
-            def _stream_custom(d):
+            def _record_device(d):
                 key = d.get("ip") or d.get("mac")
-                with scan_lock:
-                    if key and key not in scan_results:
-                        scan_results[key] = d
-                    logging.info(_format_device_row(d))
+                if key:
+                    with scan_lock:
+                        if key not in scan_results:
+                            scan_results[key] = d
 
             try:
-                _scan_ips_incremental(
-                    ips=valid_ips,
-                    subnet=None,
+                test_print(
+                    subnet=subnet,
                     local_ip=local,
                     do_port_scan=True,
                     fast=False,
-                    on_device=_stream_custom,
-                    include_arp_only=False,
-                    check_arp_fallback=True,
+                    on_device=_record_device,
                 )
             except KeyboardInterrupt:
-                print("\nCustom scan interrupted — partial results preserved.")
+                print("\nLAN scan interrupted — partial results preserved.")
             finally:
-                logging.info(sep_line)
+                elapsed = time.time() - start
+                logging.info(f"LAN scan finished in {elapsed:.1f}s")
 
-        elapsed = time.time() - start
-        if scan_results:
-            logging.info(
-                f"Custom scan finished in {elapsed:.1f}s — found {len(scan_results)} devices."
-            )
-        else:
-            print(f"Custom scan finished in {elapsed:.1f}s - No devices found.")
+        elif scan_mode == "scan -r":
+            print("\nCustom scan options:")
+            print("Format options:")
+            print(" - Single IP (example: 1.1.1.1)")
+            print(" - IP Range  (example: 1.1.1.1-1.1.1.50)\n")
 
-    elif scan_mode == "scan -s":
+            raw = input("Enter target (single IP or range): ").strip()
+            target_ips = []
 
-        if not subnet:
-            logging.info("No subnet detected.")
-            continue
-        logging.info("")
-        logging.info("Scanning SMB / NetBIOS services...\n")
-
-        spinner = Spinner("Running SMB scan")
-        spinner.start()
-        start = time.time()
-
-        try:
-            results = smb_scan(subnet, local_ip=local)
-
-        finally:
-            spinner.stop()
-
-        elapsed = time.time() - start
-
-        if results:
-            logging.info(f"Found {len(results)} SMB-capable devices:")
-
-            for r in results:
-                logging.info("")
-                logging.info(f"[{r['type']}] {r['ip']} → port {r['port']}")
-
-                if r["shares"]:
-
-                    for share in r["shares"]:
-
-                        logging.info(f"UNC Share: \\\\{r['ip']}\\{share}")
-
-                        if r["anonymous"]:
-                            logging.info("Exposure : Anonymous Share")
-                            logging.info("Enumeration : Successful")
-                        else:
-                            logging.info("Exposure : Share Detected")
-                            logging.info("Enumeration : Partial")
-
+            try:
+                if "-" in raw:
+                    start_ip, end_ip = map(str.strip, raw.split("-", 1))
+                    ipaddress.ip_address(start_ip)
+                    ipaddress.ip_address(end_ip)
+                    target_ips = _ip_range_from_full_ips(start_ip, end_ip)
                 else:
-
-                    logging.info("Exposure : SMB Reachable")
-                    logging.info("Enumeration : Denied")
-
-        else:
-            logging.info("No SMB devices found.")
-
-    elif scan_mode == "scan -t":
-
-        if not subnet:
-            logging.info("No subnet detected.")
-            continue
-
-        if subnet.num_addresses > MAX_SUBNET_HOSTS:
-            if local:
-                logging.warning(f"Subnet {subnet} is too large. Restricting to /24 around {local}.")
-                subnet = guess_subnet(local, 24)
-            else:
-                logging.error(f"Subnet {subnet} is too large ({subnet.num_addresses} addresses). Aborting HTTP scan.")
+                    ipaddress.ip_address(raw)
+                    target_ips = [raw]
+            except Exception as e:
+                print(f"Invalid input: {e}")
                 continue
 
-        ips = [str(ip) for ip in subnet.hosts()]
+            print(f"\nTarget IPs: {len(target_ips)}")
+            print(", ".join(target_ips[:10]) + (" ..." if len(target_ips) > 10 else ""))
 
-        logging.info("")
-        logging.info(f"Pre-filtering {len(ips)} hosts (ICMP + ARP)...\n")
+            logging.info("")
+            logging.info(f"Starting custom scan for {len(target_ips)} targets...")
 
-        alive_ips = set()
-        ip_mac = _parse_arp_table()
+            scan_results.clear()
+            valid_ips = []
+            for ip in target_ips:
+                if local and ip == local:
+                    logging.info(f"[SKIP] {ip} is local — skipping.")
+                    continue
+                if not is_private_ip(ip):
+                    logging.info(f"[SKIP] {ip} is not private — skipping.")
+                    continue
+                valid_ips.append(ip)
 
-        # STEP 1A: ICMP check
-        ping_workers = min(len(ips), 64)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=ping_workers) as ex:
-            for ip, ok in zip(ips, ex.map(_ping, ips)):
-                if ok:
+            start = time.time()
+            if valid_ips:
+                sep_line = _print_table_header()
+
+                def _stream_custom(d):
+                    key = d.get("ip") or d.get("mac")
+                    with scan_lock:
+                        if key and key not in scan_results:
+                            scan_results[key] = d
+                        logging.info(_format_device_row(d))
+
+                try:
+                    _scan_ips_incremental(
+                        ips=valid_ips,
+                        subnet=None,
+                        local_ip=local,
+                        do_port_scan=True,
+                        fast=False,
+                        on_device=_stream_custom,
+                        include_arp_only=False,
+                        check_arp_fallback=True,
+                    )
+                except KeyboardInterrupt:
+                    print("\nCustom scan interrupted — partial results preserved.")
+                finally:
+                    logging.info(sep_line)
+
+            elapsed = time.time() - start
+            if scan_results:
+                logging.info(
+                    f"Custom scan finished in {elapsed:.1f}s — found {len(scan_results)} devices."
+                )
+            else:
+                print(f"Custom scan finished in {elapsed:.1f}s - No devices found.")
+
+        elif scan_mode == "scan -s":
+            if not subnet:
+                logging.info("No subnet detected.")
+                continue
+            logging.info("")
+            logging.info("Scanning SMB / NetBIOS services...\n")
+
+            spinner = Spinner("Running SMB scan")
+            spinner.start()
+            start = time.time()
+
+            try:
+                results = smb_scan(subnet, local_ip=local)
+            finally:
+                spinner.stop()
+
+            elapsed = time.time() - start
+
+            if results:
+                logging.info(f"Found {len(results)} SMB-capable devices:")
+
+                for r in results:
+                    logging.info("")
+                    logging.info(f"[{r['type']}] {r['ip']} → port {r['port']}")
+
+                    if r["shares"]:
+                        for share in r["shares"]:
+                            logging.info(f"UNC Share: \\\\{r['ip']}\\{share}")
+
+                            if r["anonymous"]:
+                                logging.info("Exposure : Anonymous Share")
+                                logging.info("Enumeration : Successful")
+                            else:
+                                logging.info("Exposure : Share Detected")
+                                logging.info("Enumeration : Partial")
+                    else:
+                        logging.info("Exposure : SMB Reachable")
+                        logging.info("Enumeration : Denied")
+            else:
+                logging.info("No SMB devices found.")
+
+        elif scan_mode == "scan -t":
+            if not subnet:
+                logging.info("No subnet detected.")
+                continue
+
+            target_subnet = _clamp_subnet(subnet, local_ip=local, action="HTTP scan")
+            if not target_subnet:
+                continue
+
+            ips = [str(ip) for ip in target_subnet.hosts()]
+
+            logging.info("")
+            logging.info(f"Pre-filtering {len(ips)} hosts (ICMP + ARP)...\n")
+
+            alive_ips = set()
+            ip_mac = _parse_arp_table()
+
+            # STEP 1A: ICMP check
+            ping_workers = min(len(ips), 64)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=ping_workers) as ex:
+                for ip, ok in zip(ips, ex.map(_ping, ips)):
+                    if ok:
+                        alive_ips.add(ip)
+
+            # STEP 1B: ARP fallback (THIS is what makes DG appear)
+            for ip in ip_mac.keys():
+                if ip in ips:
                     alive_ips.add(ip)
 
-        # STEP 1B: ARP fallback (THIS is what makes DG appear)
-        for ip in ip_mac.keys():
-            if ip in ips:
-                alive_ips.add(ip)
+            alive_ips = list(alive_ips)
 
-        alive_ips = list(alive_ips)
+            logging.info(f"Alive hosts: {len(alive_ips)}\n")
 
-        logging.info(f"Alive hosts: {len(alive_ips)}\n")
+            results = []
 
-        results = []
+            spinner = Spinner("Scanning HTTP services")
+            spinner.start()
+            start = time.time()
 
-        spinner = Spinner("Scanning HTTP services")
-        spinner.start()
-        start = time.time()
+            try:
+                def check(ip):
+                    return (ip, http_probe(ip, timeout=2))
 
-        try:
-            def check(ip):
-                return (ip, http_probe(ip, timeout=2))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=80) as ex:
+                    for ip, res in ex.map(check, alive_ips):
+                        if res:
+                            results.append({
+                                "ip": ip,
+                                "url": res["url"],
+                                "status": res["status"],
+                                "server": res["server"]
+                            })
+            finally:
+                spinner.stop()
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=80) as ex:
-                for ip, res in ex.map(check, alive_ips):
-                    if res:
-                        results.append({
-                            "ip": ip,
-                            "url": res["url"],
-                            "status": res["status"],
-                            "server": res["server"]
-                        })
+            for r in results:
+                logging.info(f"[HTTP] {r['ip']} → {r['status']} {r['server']}")
 
-        finally:
-            spinner.stop()
-
-        for r in results:
-            logging.info(f"[HTTP] {r['ip']} → {r['status']} {r['server']}")
-            
-    elif scan_mode == "scan -x":
-        # --- Ask for timeout ---
-        try:
-            timeout = int(input("\nSelect timeout (10-300 seconds, 0 = unlimited): ").strip())
-            if timeout < 0 or timeout > 300:
+        elif scan_mode == "scan -x":
+            # --- Ask for timeout ---
+            try:
+                timeout = int(input("\nSelect timeout (10-300 seconds, 0 = unlimited): ").strip())
+                if timeout < 0 or timeout > 300:
+                    print("Invalid timeout, using default 0 (unlimited).")
+                    timeout = 0
+            except ValueError:
                 print("Invalid timeout, using default 0 (unlimited).")
                 timeout = 0
-        except ValueError:
-            print("Invalid timeout, using default 0 (unlimited).")
-            timeout = 0
 
-        # --- Ask for ports ---
-        raw_ports = input(f"\nType which ports to inspect (for example: 80, 443) or press Enter for all ports: ").strip()
-        if raw_ports:
-            try:
-                ports_to_monitor = [int(p.strip()) for p in raw_ports.split(",") if p.strip()]
-            except ValueError:
-                print("Invalid port list, falling back to all ports.")
+            # --- Ask for ports ---
+            raw_ports = input("\nType which ports to inspect (for example: 80, 443) or press Enter for all ports: ").strip()
+            if raw_ports:
+                try:
+                    ports_to_monitor = [int(p.strip()) for p in raw_ports.split(",") if p.strip()]
+                except ValueError:
+                    print("Invalid port list, falling back to all ports.")
+                    ports_to_monitor = None
+            else:
                 ports_to_monitor = None
-        else:
-            ports_to_monitor = None
 
-        stop_event, thread = start_connection_inspector(interval=2, ports=ports_to_monitor, timeout=timeout)
+            stop_event, thread = start_connection_inspector(interval=2, ports=ports_to_monitor, timeout=timeout)
 
-        try:
-            print("\nTraffic flow running... Press ENTER to stop or Ctrl+C")
-            input()  # Wait for ENTER or Ctrl+C
-        except KeyboardInterrupt:
-            print("\nStopping due to keyboard interrupt...")
-        finally:
-            stop_event.set()
-            thread.join()
-        
-    export = input("\nExport logs to text file? (Y to export, Enter to skip): ").strip().lower()
-    if export == "y":
-        # Generate timestamp for filename
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        export_path = f"scan_log_export_{timestamp}.txt"
-        
-        # Write log buffer to file
-        with open(export_path, "w", encoding="utf-8") as f:
-            f.write(log_buffer.getvalue())
-        
-        print(f"Logs exported → {export_path}")
-        continue
+            try:
+                print("\nTraffic flow running... Press ENTER to stop or Ctrl+C")
+                input()  # Wait for ENTER or Ctrl+C
+            except KeyboardInterrupt:
+                print("\nStopping due to keyboard interrupt...")
+            finally:
+                stop_event.set()
+                thread.join()
+
+        export = input("\nExport logs to text file? (Y to export, Enter to skip): ").strip().lower()
+        if export == "y":
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            export_path = f"scan_log_export_{timestamp}.txt"
+
+            with open(export_path, "w", encoding="utf-8") as f:
+                f.write(log_buffer.getvalue())
+
+            print(f"Logs exported → {export_path}")
+
+
+if __name__ == "__main__":
+    main()
