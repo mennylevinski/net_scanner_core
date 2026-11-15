@@ -34,7 +34,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from typing import List, Dict, Iterable, Optional
 
-version = "1.9.5"
+version = "1.9.6"
 
 try:
     from VersionChecker import fetch_latest_version
@@ -868,7 +868,7 @@ def _detect_direction(
         return "OUT"  # default fallback
 
 def start_connection_inspector(
-    interval: float = 1.0,
+    interval: float = 0.2,
     ports: Optional[List[int]] = None,
     timeout: int = 0,
     skip_time_wait: bool = True
