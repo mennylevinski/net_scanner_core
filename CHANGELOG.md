@@ -3,7 +3,12 @@ All notable changes to **Net Scanner Core** are documented in this file.
 
 ---
 
-## [1.9.5] – 2026-11-13 Latest
+## [1.9.6] – 2026-11-15 Latest
+- Reduced the connection inspection interval from 1.0 to 0.2 seconds.
+
+---
+
+## [1.9.5] – 2026-11-13
 - Incremental streaming execution for LAN scanning and custom IP range scanning.
 - Fixed hostname resolution (`_resolve_hostname`), preventing blocking OS reverse-DNS timeouts.
 - Eliminated redundant `/32` subnet scans in `scan -R` and preserved partial scan results.
