@@ -19,7 +19,7 @@ from .ports import _highlight_risky_ports
 log_buffer = io.StringIO()
 
 _TABLE_HEADERS = ["IP Address", "Hostname", "MAC", "Alive", "Open Ports"]
-_TABLE_COL_WIDTHS = [15, 20, 20, 10, 50]
+_TABLE_COL_WIDTHS = [15, 34, 20, 10, 56]
 
 
 def reset_log_buffer() -> None:
@@ -50,38 +50,83 @@ def setup_logger(level=logging.INFO, logfile: Optional[str] = None) -> None:
     logging.basicConfig(level=level, handlers=handlers, force=True)
 
 
-def ensure_console(title: str = "Net Scanner Core") -> None:
+def _is_embedded_ide_terminal() -> bool:
+    """Return True when running inside an IDE integrated terminal (e.g., VS Code, JetBrains)."""
+    term_prog = os.environ.get("TERM_PROGRAM", "").lower()
+    term_emu = os.environ.get("TERMINAL_EMULATOR", "").lower()
+    return (
+        term_prog == "vscode"
+        or bool(os.environ.get("VSCODE_INJECTION"))
+        or term_emu.startswith("jetbrains")
+    )
+
+
+def maximize_console() -> bool:
     """
-    Ensure a console exists on Windows without breaking piped/redirected I/O.
-    Only attaches/allocates a console and reopens CONOUT$/CONIN$ when streams
-    are missing (e.g., GUI-less PyInstaller binary).
+    Maximize the interactive terminal window while keeping title bar and taskbar.
+    Skips non-TTY/piped runs and embedded IDE terminals.
+    Returns True if a maximize request was issued.
     """
-    if not sys.platform.startswith("win"):
-        return
+    if not (hasattr(sys.stdout, "isatty") and sys.stdout.isatty()):
+        return False
+    if _is_embedded_ide_terminal():
+        return False
 
     try:
-        import ctypes
+        if sys.platform.startswith("win"):
+            import ctypes
 
-        kernel32 = ctypes.windll.kernel32
-        streams_missing = sys.stdout is None or sys.stderr is None or sys.stdin is None
-        if streams_missing:
-            ATTACH_PARENT_PROCESS = -1
-            if not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
-                kernel32.AllocConsole()
-            if sys.stdout is None:
-                sys.stdout = open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="ignore")
-            if sys.stderr is None:
-                sys.stderr = open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="ignore")
-            if sys.stdin is None:
-                sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="ignore")
+            SW_MAXIMIZE = 3
+            user32 = ctypes.windll.user32
+            if os.environ.get("WT_SESSION"):
+                hwnd = user32.GetForegroundWindow()
+            else:
+                hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                user32.ShowWindow(hwnd, SW_MAXIMIZE)
+                return True
+            return False
 
-        if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
-            try:
-                kernel32.SetConsoleTitleW(str(title))
-            except Exception:
-                pass
+        # POSIX terminals (xterm, GNOME Terminal, Kali qterminal, Konsole, etc.)
+        sys.stdout.write("\x1b[9;1t")
+        sys.stdout.flush()
+        return True
     except Exception:
-        pass
+        return False
+
+
+def ensure_console(title: str = "Net Scanner Core", maximize: bool = True) -> None:
+    """
+    Ensure a console exists on Windows without breaking piped/redirected I/O,
+    set the title, and optionally maximize the terminal window in interactive mode.
+    """
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            streams_missing = sys.stdout is None or sys.stderr is None or sys.stdin is None
+            if streams_missing:
+                ATTACH_PARENT_PROCESS = -1
+                if not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+                    kernel32.AllocConsole()
+                if sys.stdout is None:
+                    sys.stdout = open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="ignore")
+                if sys.stderr is None:
+                    sys.stderr = open("CONOUT$", "w", buffering=1, encoding="utf-8", errors="ignore")
+                if sys.stdin is None:
+                    sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="ignore")
+
+            if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+                try:
+                    kernel32.SetConsoleTitleW(str(title))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if maximize:
+        maximize_console()
 
 
 class Spinner:

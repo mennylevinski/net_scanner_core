@@ -229,6 +229,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Export format for --output (default: inferred from extension or txt)",
     )
+    parser.add_argument(
+        "--no-maximize",
+        action="store_true",
+        help="Do not maximize the terminal window in interactive mode",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--log",
@@ -480,7 +485,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     is_cli_mode = any([args.lan, args.range, args.smb, args.http, args.flow])
     if not is_cli_mode:
-        ensure_console("Net Scanner Core")
+        ensure_console("Net Scanner Core", maximize=not args.no_maximize)
 
     log_level = logging.DEBUG if args.debug else logging.INFO
     setup_logger(level=log_level, logfile=args.log)

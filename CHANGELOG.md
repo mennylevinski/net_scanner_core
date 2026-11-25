@@ -3,7 +3,13 @@ All notable changes to **Net Scanner Core** are documented in this file.
 
 ---
 
-## [1.9.7] – 2026-11-25 Latest
+## [1.9.8] – 2026-11-25 Latest
+- Added automatic terminal window maximization in interactive mode (`maximize_console()`) across Windows, Windows Terminal, and Linux terminals
+- Expanded scan output table widths (`Hostname` `20` → `34`, `Open Ports` `50` → `56`) for clearer display of hostnames and protocol-tagged ports
+
+---
+
+## [1.9.7] – 2026-11-25
 - Modularized codebase into `src/scanner/` (`config`, `network`, `ports`, `discovery`, `http_probe`, `smb`, `inspector`, `export`, `cli`) with `src/net_scanner.py`
 - Replaced legacy interactive `scan -L/-R/-S/-T/-X` commands with a unified CLI/REPL grammar (`scan --lan`, `scan --range`, `scan --smb`, `scan --http`, `scan --flow`, `export <txt|json|csv> [FILE]`) 
 - Added non-interactive `argparse` flags, CIDR target support, and TXT/JSON/CSV export

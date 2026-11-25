@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "net-scanner-core"
-version = "1.9.7"
+version = "1.9.8"
 description = "Cross-platform ethical Python network scanner for LAN discovery, port detection, HTTP/SMB checks, and real-time traffic flow inspection."
 readme = "README.md"
 license = { file = "LICENSE" }

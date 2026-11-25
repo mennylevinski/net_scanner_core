@@ -76,7 +76,7 @@ If you trust this application, you may need to add it as an exception in your an
 - Clone the repository or run [net_scanner.py](src/net_scanner.py)
 
 #### 3️⃣ Run
-- Interactive mode:
+- Interactive mode *(opens maximized; pass `--no-maximize` to disable)*:
   - Windows: `python src/net_scanner.py`
   - Linux: `python3 src/net_scanner.py`
   - Example interactive commands:

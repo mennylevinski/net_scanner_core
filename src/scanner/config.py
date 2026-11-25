@@ -4,7 +4,7 @@ import platform
 import subprocess
 from typing import Dict, List, Set, Tuple
 
-VERSION = "1.9.7"
+VERSION = "1.9.8"
 version = VERSION
 
 # Common TCP ports (synchronized with PORTS.md)

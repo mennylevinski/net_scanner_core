@@ -327,6 +327,25 @@ class TestExportAndCli(unittest.TestCase):
         self.assertEqual(ns.parse_interactive_command("HELP"), ("help", None))
         self.assertEqual(ns.parse_interactive_command("exit"), ("exit", None))
 
+    def test_maximize_console_guards_and_posix_sequence(self):
+        fake_non_tty = mock.MagicMock()
+        fake_non_tty.isatty.return_value = False
+        with mock.patch("scanner.export.sys.stdout", fake_non_tty):
+            self.assertFalse(export.maximize_console())
+
+        fake_tty = mock.MagicMock()
+        fake_tty.isatty.return_value = True
+        with mock.patch("scanner.export.sys.stdout", fake_tty), \
+             mock.patch.dict(os.environ, {"TERM_PROGRAM": "vscode"}, clear=False):
+            self.assertFalse(export.maximize_console())
+
+        with mock.patch("scanner.export.sys.stdout", fake_tty), \
+             mock.patch("scanner.export.sys.platform", "linux"), \
+             mock.patch.dict(os.environ, {"TERM_PROGRAM": "", "VSCODE_INJECTION": "", "TERMINAL_EMULATOR": ""}, clear=False):
+            self.assertTrue(export.maximize_console())
+            fake_tty.write.assert_called_once_with("\x1b[9;1t")
+            fake_tty.flush.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
