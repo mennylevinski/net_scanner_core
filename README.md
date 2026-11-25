@@ -27,13 +27,14 @@ Licensed under the [MIT License](LICENSE).
 
 ## ✨ Features
 
-- **LAN Detection Mode**, detects your IPv4 subnet and scans the local network
-- **Custom Scan Mode**, user can select to target a spesific IP address or IP ranges
-- **HTTP Service Scan**, identifies web services running on discovered hosts
-- **Fast & Accurate**, combines ICMP, ARP, and socket checks and auto discovery
-- **Port Detection**, scans common service ports (FTP, SMB, SSH, RDP, and more)
-- **Basic Traffic Flow** module, real-time monitoring of active TCP connections
-- **Logging system**, exportable log file (TXT format) for more detailed output
+- **LAN Detection Mode**, detects your IPv4 subnet and scans the local network incrementally
+- **Custom Scan Mode**, target a specific IP address, IP range, or CIDR block (e.g., `192.168.1.0/24`)
+- **HTTP Service Scan**, identifies HTTP/HTTPS web services running on discovered hosts
+- **Fast & Accurate**, combines ICMP, ARP (`ip neigh` / `arp -a`), and bounded TCP/UDP probes
+- **Port Detection**, scans common TCP and UDP service ports with protocol tags and risky-port labels
+- **SMB / NetBIOS Scan**, detects reachable SMB services and safe anonymous share exposure
+- **Traffic Flow Inspection**, real-time monitoring of active TCP and UDP connections (`0.2s` default interval)
+- **CLI & Export Support**, interactive menu or non-interactive flags (`--lan`, `--range`, `--http`, `--smb`, `--flow`) with TXT, JSON, and CSV export
 
 For a complete list of the common ports scanned by the tool, see [PORTS.md](PORTS.md)
 
@@ -41,9 +42,6 @@ For a complete list of the common ports scanned by the tool, see [PORTS.md](PORT
 
 ## 📸 Kali Linux
 
-![Net Scanner – LAN Scanning](img/net_scanner_screenshot1.png)
-
-![Net Scanner – Traffic Inspection](img/net_scanner_screenshot2.png)
 
 ---
 
@@ -70,18 +68,28 @@ If you trust this application, you may need to add it as an exception in your an
 ### 🐍 Cross-platform
 
 #### 1️⃣ Requirements
-- Python **3.0+**
+- Python **3.8+**
 - Works on **Windows** & **Linux**
-- Dependencies: `pip install psutil`, `pip install requests`
+- Dependencies: `pip install -r requirements.txt` (`psutil`, `requests`)
 
 #### 2️⃣ Script
-- Download the script [net_scanner.py](src/net_scanner.py)
+- Clone the repository or run [net_scanner.py](src/net_scanner.py)
 
 #### 3️⃣ Run
-- Windows: `python net_scanner.py`
-- Linux:<br> 
-      1. `chmod +x net_scanner.py` <br>
-      2. `python3 net_scanner.py`
+- Interactive mode:
+  - Windows: `python src/net_scanner.py`
+  - Linux: `python3 src/net_scanner.py`
+  - Example interactive commands:
+    - `> scan --lan --fast`
+    - `> scan --range 192.168.1.0/24 --ports 22,80,443 --output hosts.json`
+    - `> scan --http --output web.csv`
+    - `> scan --flow --timeout 30 --ports 80,443`
+    - `> export json results.json`
+- Non-interactive CLI examples:
+  - `python src/net_scanner.py --lan --output lan_scan.json`
+  - `python src/net_scanner.py --range 192.168.1.0/24 --fast --output hosts.csv`
+  - `python src/net_scanner.py --http`
+  - `python src/net_scanner.py --flow --timeout 30 --ports 80,443`
 
 ---
 
@@ -90,15 +98,29 @@ If you trust this application, you may need to add it as an exception in your an
 ```bash
 net_scanner_core/             # Main project folder
 │
-├── media/                # Images, diagrams, UI assets
+├── img/                  # Screenshots and UI assets
 │
 ├── src/                  # Core application source code
+│   ├── net_scanner.py    # Entrypoint and public facade
+│   └── scanner/          # Modular scanning components
+│       ├── config.py     # Constants, ports, probes, OS helpers
+│       ├── network.py    # Interface, ping, ARP, hostname resolution
+│       ├── ports.py      # Bounded TCP/UDP port scanner
+│       ├── discovery.py  # Incremental LAN/range host discovery
+│       ├── http_probe.py # HTTP/HTTPS service probing
+│       ├── smb.py        # SMB/NetBIOS detection and share check
+│       ├── inspector.py  # Real-time TCP/UDP traffic flow monitor
+│       ├── export.py     # Logging, table rendering, TXT/JSON/CSV export
+│       └── cli.py        # Interactive menu and argparse CLI
 │
+├── tests/                # Unit test suite
 ├── CHANGELOG.md          # Version history
 ├── CONTRIBUTING.md       # Contribution guidelines
 ├── LICENSE               # Project license
 ├── PORTS.md              # List of all common ports scanned by the tool
+├── pyproject.toml        # Package metadata & console script config
 ├── README.md             # Main documentation
+├── requirements.txt      # Python dependencies
 ├── SECURITY.md           # Security policy
 └── .gitignore
 ```

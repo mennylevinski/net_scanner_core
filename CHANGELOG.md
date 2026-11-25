@@ -3,24 +3,35 @@ All notable changes to **Net Scanner Core** are documented in this file.
 
 ---
 
-## [1.9.6] – 2026-11-15 Latest
-- Reduced the connection inspection interval from 1.0 to 0.2 seconds.
+## [1.9.7] – 2026-11-25 Latest
+- Modularized codebase into `src/scanner/` (`config`, `network`, `ports`, `discovery`, `http_probe`, `smb`, `inspector`, `export`, `cli`) with `src/net_scanner.py`
+- Replaced legacy interactive `scan -L/-R/-S/-T/-X` commands with a unified CLI/REPL grammar (`scan --lan`, `scan --range`, `scan --smb`, `scan --http`, `scan --flow`, `export <txt|json|csv> [FILE]`) 
+- Added non-interactive `argparse` flags, CIDR target support, and TXT/JSON/CSV export
+- Replaced per-host nested port-scan thread pools with a shared bounded executor and socket semaphore (`256` max), aligned TCP/UDP port lists with `PORTS.md`
+- Fixed Traffic Flow (`--flow`) to use the `0.2s` default interval, real detected subnet mask, bounded FIFO deduplication, and automatic non-blocking exit on timeout expiration
+- Improved HTTP scanning (`--http`) with fast TCP pre-checks, `HEAD` requests with `405`/`501` streaming-`GET` fallback, true `SSLError` HTTP retry, post-ping ARP lookup, URL output
+- Improved cross-platform and offline reliability: air-gapped LAN interface fallback, active-NIC MAC detection, APIPA guard consistency, Linux `ip neigh` and `smbclient` fallbacks
+
+---
+
+## [1.9.6] – 2026-11-15
+- Reduced the connection inspection interval from 1.0 to 0.2 seconds per pulse, improving monitoring responsiveness
 
 ---
 
 ## [1.9.5] – 2026-11-13
-- Incremental streaming execution for LAN scanning and custom IP range scanning.
-- Fixed hostname resolution (`_resolve_hostname`), preventing blocking OS reverse-DNS timeouts.
-- Eliminated redundant `/32` subnet scans in `scan -R` and preserved partial scan results.
+- Incremental streaming execution for LAN scanning and custom IP range scanning
+- Fixed hostname resolution (`_resolve_hostname`), preventing blocking OS reverse-DNS timeouts
+- Eliminated redundant `/32` subnet scans in `scan -R` and preserved partial scan results
 
 ---
 
 ## [1.9.4] – 2026-11-13
-- Fixed user-selected timeout being discarded and sleep interval in Traffic Flow (`scan -x`).
-- Added UDP datagram probing to eliminate false negatives when scanning UDP ports from PORTS.md.
-- Optimized connection direction lookup in Connection Inspector from O(N²) to O(N).
-- Corrected ARP parsing on Windows and normalized broadcast MAC address filtering on Linux.
-- Added subnet size guardrails and bounded concurrent ping workers to (/16, /8) networks.
+- Fixed user-selected timeout being discarded and sleep interval in Traffic Flow (`scan -x`)
+- Added UDP datagram probing to eliminate false negatives when scanning UDP ports from PORTS.md
+- Optimized connection direction lookup in Connection Inspector from O(N²) to O(N)
+- Corrected ARP parsing on Windows and normalized broadcast MAC address filtering on Linux
+- Added subnet size guardrails and bounded concurrent ping workers to (/16, /8) networks
 
 ---
 

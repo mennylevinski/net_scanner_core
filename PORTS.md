@@ -1,4 +1,4 @@
-# Common Ports Scanned by Net Scanner Core (v1.9.6)
+# Common Ports Scanned by Net Scanner Core (v1.9.7)
 
 This file lists the common ports that **Net Scanner Core** scans, along with their standard protocols and associated services.  
 
@@ -56,8 +56,13 @@ This file lists the common ports that **Net Scanner Core** scans, along with the
 | 5986   | TCP       | WinRM HTTPS                        |
 | 6379   | TCP       | Redis                              |
 | 8000   | TCP       | HTTP Alternate / Dev               |
+| 8008   | TCP       | HTTP Alternate                     |
 | 8080   | TCP       | HTTP Alternate / Proxy             |
+| 8081   | TCP       | HTTP Alternate                     |
 | 8443   | TCP       | HTTPS Alternate                    |
+| 8888   | TCP       | HTTP Alternate / Dev Notebook      |
+| 9000   | TCP       | App / Admin Web Interface          |
+| 9001   | TCP       | App / Tor / Admin Interface        |
 | 9042   | TCP       | Cassandra / CQL                    |
 | 10000  | TCP       | Webmin                             |
 | 10443  | TCP       | HTTPS Alternate                    |

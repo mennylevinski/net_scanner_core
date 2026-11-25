@@ -67,8 +67,8 @@ You can help in many ways:
 
 To keep the project clean and consistent, please follow these rules:
 
-* **Python version:** Python 3.x only
-* **No external dependencies** — standard library only
+* **Python version:** Python 3.8+
+* **Minimal external dependencies** — only `psutil` and `requests` (listed in `requirements.txt` / `pyproject.toml`)
 * Keep the tool **cross-platform** (Windows & Linux)
 * Avoid OS-specific hacks unless clearly isolated
 * Write clear, readable, and well-commented code

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "net-scanner-core"
+version = "1.9.7"
+description = "Cross-platform ethical Python network scanner for LAN discovery, port detection, HTTP/SMB checks, and real-time traffic flow inspection."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Menny Levinski" }]
+requires-python = ">=3.8"
+dependencies = [
+    "psutil>=5.9.0",
+    "requests>=2.28.0",
+]
+
+[project.scripts]
+net-scanner = "scanner.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["scanner*"]
