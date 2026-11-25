@@ -42,6 +42,9 @@ For a complete list of the common ports scanned by the tool, see [PORTS.md](PORT
 
 ## 📸 Kali Linux
 
+![Net Scanner – LAN Scanning](img/net_scanner_screenshot1.png)
+
+![Net Scanner – Traffic Inspection](img/net_scanner_screenshot2.png)
 
 ---
 
